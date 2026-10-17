@@ -76,6 +76,10 @@ def from_file(settings: Settings, history: History) -> Topic | None:
             continue
         key = f"file:{line}"
         if not history.topic_used(key):
+            if re.match(r"^https?://", line, re.I):
+                t = from_url(line)
+                t.key = key
+                return t
             return Topic(line, "file", key=key)
     log.info("All topics in %s have been used", p)
     return None
@@ -431,8 +435,16 @@ def pick_topic(settings: Settings, history: History, explicit: str | None = None
     if source in (None, "queue"):
         idea = history.claim_idea()
         if idea:
+            subj = (idea.get("subject") or "").strip()
+            if re.match(r"^https?://", subj, re.I):
+                t = from_url(subj)
+                t.key = f'idea:{idea["id"]}'
+                t.idea_id = idea["id"]
+                if idea.get("style"):
+                    t.style = idea["style"]
+                return t
             angle = (idea.get("notes") or "").strip()
-            subject = f'{idea["subject"]} (angle: {angle})' if angle else idea["subject"]
+            subject = f'{subj} (angle: {angle})' if angle else subj
             return Topic(subject, "idea", key=f'idea:{idea["id"]}', style=idea.get("style") or "",
                          idea_id=idea["id"])
         if source == "queue":
