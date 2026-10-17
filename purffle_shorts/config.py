@@ -97,7 +97,7 @@ class Settings:
     topic_sources: list[str] = field(default_factory=lambda: ["niche"])  # niche,trending,wikipedia,reddit,file
     topics_file: str = "topics.txt"
     trends_geo: str = "US"
-    style: str = "auto"               # auto|facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat
+    style: str = "auto"               # auto|facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat|reddit|product
     language: str = "en"
     target_seconds: int = 40
     channel_name: str = "PurffleStudios"
@@ -108,6 +108,11 @@ class Settings:
     # --- LLM ------------------------------------------------------------------------------
     llm_provider: str = "auto"
     llm_model: str = ""
+    llm_model_planner: str = ""
+    llm_model_script: str = ""
+    llm_model_review: str = ""
+    llm_model_translation: str = ""
+    llm_model_clip: str = ""
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_fallbacks: list[str] = field(default_factory=list)
@@ -117,7 +122,7 @@ class Settings:
     learn_from_stats: bool = False    # show the LLM which of your videos got the most / fewest views
 
     # --- voice ----------------------------------------------------------------------------
-    tts_engine: str = "edge"          # edge|openai|elevenlabs|kokoro|coqui|system|silent
+    tts_engine: str = "edge"          # edge|openai|openrouter|elevenlabs|kokoro|coqui|system|silent
     tts_voice: str = ""               # blank = best default for the language; comma list = rotate
     tts_voice_b: str = ""             # second speaker (dialogue and chat formats); blank = automatic
     tts_rate: str = "+8%"             # edge-tts speaking rate
@@ -129,6 +134,9 @@ class Settings:
     visual_sources: list[str] = field(default_factory=lambda: ["pexels", "pixabay"])
     media_dir: str = "media"
     image_model: str = "gpt-image-1"
+    openrouter_image_model: str = "bytedance-seed/seedream-5-0-flash"
+    openrouter_video_model: str = "bytedance/seedance-2.0-mini"
+    clip_transcription_model: str = ""
     visual_style: str = "cinematic, dramatic lighting, highly detailed, vertical composition"
     prefer_4k: bool = False
 
@@ -183,6 +191,7 @@ class Settings:
 
     # --- API keys (read from the environment, never logged) --------------------------------
     openai_api_key: str = ""
+    openrouter_api_key: str = ""
     pexels_api_key: str = ""
     pixabay_api_key: str = ""
     elevenlabs_api_key: str = ""
@@ -261,6 +270,11 @@ class Settings:
             also_languages=[v.lower() for v in _list(_env("ALSO_LANGUAGES"))],
             llm_provider=_env("LLM_PROVIDER", d.llm_provider).lower(),
             llm_model=_env("LLM_MODEL"),
+            llm_model_planner=_env("LLM_MODEL_PLANNER"),
+            llm_model_script=_env("LLM_MODEL_SCRIPT"),
+            llm_model_review=_env("LLM_MODEL_REVIEW"),
+            llm_model_translation=_env("LLM_MODEL_TRANSLATION"),
+            llm_model_clip=_env("LLM_MODEL_CLIP"),
             llm_base_url=_env("LLM_BASE_URL"),
             llm_api_key=_env("LLM_API_KEY"),
             llm_fallbacks=[p.lower() for p in _list(_env("LLM_FALLBACKS"))],
@@ -278,6 +292,9 @@ class Settings:
             visual_sources=[v.lower() for v in _list(_env("VISUAL_SOURCES", "pexels,pixabay"))],
             media_dir=_env("MEDIA_DIR", d.media_dir),
             image_model=_env("IMAGE_MODEL", d.image_model),
+            openrouter_image_model=_env("OPENROUTER_IMAGE_MODEL", d.openrouter_image_model),
+            openrouter_video_model=_env("OPENROUTER_VIDEO_MODEL", d.openrouter_video_model),
+            clip_transcription_model=_env("CLIP_TRANSCRIPTION_MODEL"),
             visual_style=_env("VISUAL_STYLE", d.visual_style),
             prefer_4k=_bool(_env("PREFER_4K", "false")),
             resolution=resolution,
@@ -322,6 +339,7 @@ class Settings:
             output_dir=_env("OUTPUT_DIR", d.output_dir),
             data_dir=_env("DATA_DIR", d.data_dir),
             openai_api_key=_env("OPENAI_API_KEY"),
+            openrouter_api_key=_env("OPENROUTER_API_KEY"),
             pexels_api_key=_env("PEXELS_API_KEY"),
             pixabay_api_key=_env("PIXABAY_API_KEY"),
             elevenlabs_api_key=_env("ELEVENLABS_API_KEY", "", "XI_API_KEY"),

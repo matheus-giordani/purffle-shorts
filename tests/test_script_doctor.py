@@ -162,3 +162,60 @@ def test_offline_reddit_story():
     s = offline_script("", Settings(), "reddit")
     assert s.style == "reddit" and s.cast == ["r/confessions", "u/quiet_otter22"]
     assert s.scenes[0].narration.startswith("Am I wrong") and len(s.scenes) == 8
+
+
+def test_product_showcase_normalizes_badges_and_cast():
+    scenes = [
+        {"speaker": "A", "product": "", "narration": "Three home finds that fix daily annoyances.", "search_query": "q0", "image_prompt": "p0"},
+        {"speaker": "A", "product": "1. Waterproof Outlet Cover", "narration": "Keep water splashes off bathroom outlets.", "search_query": "q1", "image_prompt": "p1"},
+        {"speaker": "A", "product": "1. Waterproof Outlet Cover", "narration": "Peel, stick, and snap the lid closed.", "search_query": "q2", "image_prompt": "p2"},
+        {"speaker": "A", "product": "2. Magnetic Cable Clip", "narration": "Stop cords from falling behind the desk.", "search_query": "q3", "image_prompt": "p3"},
+    ]
+    s = normalize({"title": "3 Home Finds", "scenes": scenes}, "home finds", "product", "en")
+    assert s.style == "product" and not s.multi_speaker
+    assert s.cast == ["1. Waterproof Outlet Cover", "2. Magnetic Cable Clip"]
+    assert [sc.product for sc in s.scenes] == ["", "1. Waterproof Outlet Cover", "1. Waterproof Outlet Cover", "2. Magnetic Cable Clip"]
+
+
+def test_product_showcase_fills_missing_scene_badges_from_cast():
+    s = normalize({"title": "T", "cast": ["1. Pill Bottle", "2. Cord Holder"], "scenes": _scenes(5)}, "x", "product", "en")
+    assert s.cast == ["1. Pill Bottle", "2. Cord Holder"]
+    assert s.scenes[0].product == ""
+    assert any(sc.product == "1. Pill Bottle" for sc in s.scenes[1:])
+    assert any(sc.product == "2. Cord Holder" for sc in s.scenes[1:])
+
+
+def test_script_from_data_detects_product_format_and_aliases():
+    scenes = _scenes(4)
+    scenes[1]["product"] = "1. Smart Mug"
+    s = script_from_data({"title": "Gadgets", "scenes": scenes}, Settings())
+    assert s.style == "product" and s.cast == ["1. Smart Mug"]
+    s2 = script_from_data({"title": "Gadgets", "style": "achadinhos", "scenes": scenes}, Settings())
+    assert s2.style == "product"
+
+
+def test_product_translation_translates_product_badges():
+    scenes = _scenes(3)
+    scenes[1]["product"] = "1. Waterproof Outlet Cover"
+    scenes[2]["product"] = "2. Magnetic Cable Clip"
+    src = normalize({"title": "Finds", "scenes": scenes}, "x", "product", "en")
+    reply = {
+        "title": "Achadinhos",
+        "cast": ["1. Protetor de Tomada", "2. Clipe Magnético"],
+        "scenes": [
+            {"speaker": "A", "product": "", "narration": "Olha esses itens.", "search_query": "x", "image_prompt": "x"},
+            {"speaker": "A", "product": "1. Protetor de Tomada", "narration": "Protege da água.", "search_query": "x", "image_prompt": "x"},
+            {"speaker": "A", "product": "2. Clipe Magnético", "narration": "Segura os cabos.", "search_query": "x", "image_prompt": "x"},
+        ],
+    }
+    out = translate_script(FakeLLM(reply), src, "pt")
+    assert out.style == "product"
+    assert [sc.product for sc in out.scenes] == ["", "1. Protetor de Tomada", "2. Clipe Magnético"]
+    assert [sc.search_query for sc in out.scenes] == ["q0", "q1", "q2"]
+
+
+def test_offline_product_showcase():
+    s = offline_script("", Settings(), "product")
+    assert s.style == "product" and len(s.cast) == 3 and len(s.scenes) == 6
+    assert s.scenes[0].product == "" and s.scenes[1].product.startswith("1.")
+

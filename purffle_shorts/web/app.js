@@ -42,6 +42,7 @@ const FORMATS = [
   ["dialogue", "Dialogue", "Two voices, back and forth", true],
   ["chat", "Text story", "Animated text messages", true],
   ["reddit", "Reddit story", "Post card, then the story", true],
+  ["product", "Product", "Showcase products with top badges", true],
 ];
 const MULTI = new Set(["dialogue", "chat"]);
 const STAGES = [["topic", "Topic"], ["script", "Script"], ["review", "Review"], ["voice", "Voice"], ["footage", "Footage"],
@@ -123,6 +124,9 @@ async function boot() {
     aspect: ["9:16", "16:9", "1:1", "4:5"].includes(i.aspect) ? i.aspect : "9:16", caption_style: i.caption_style,
     caption_position: i.caption_position, grade: i.grade, transition: i.transition, review: i.review, tts: i.tts,
     voice: "", voice_b: "", provider: "", model: "", also_langs: (i.also_languages || []).join(", "), music: true,
+    model_planner: i.llm_models?.planner || "", model_script: i.llm_models?.script || "",
+    model_review: i.llm_models?.review || "", model_translation: i.llm_models?.translation || "",
+    model_clip: i.llm_models?.clip || "",
     upload: false, offline: !i.llm_ok, visuals: i.visuals,
   }, S.form);
   if (!i.llm_ok) S.form.offline = true;
@@ -224,6 +228,7 @@ function payload(extra = {}) {
     style: f.style === "auto" ? "" : f.style, language: f.language, duration: f.duration, aspect: f.aspect,
     caption_style: f.caption_style, caption_position: f.caption_position, grade: f.grade, transition: f.transition,
     tts: f.tts, voice: f.voice, voice_b: f.voice_b, provider: f.provider, model: f.model, review: f.review,
+    ...modelPayload(),
     also_langs: f.also_langs, music: f.music, upload: f.upload && S.info.upload && !f.offline, offline: f.offline,
     visuals: f.visuals,
   };
@@ -231,6 +236,11 @@ function payload(extra = {}) {
   if (f.mode === "url") p.url = f.url.trim();
   if (f.mode === "queue") p.source = "queue";
   return Object.assign(p, extra);
+}
+function modelPayload() {
+  const f = S.form;
+  return Object.fromEntries(["planner", "script", "review", "translation", "clip"]
+    .map(stage => [`model_${stage}`, f[`model_${stage}`] || ""]));
 }
 
 async function startMake(extra = {}) {
@@ -280,7 +290,7 @@ function drawForm() {
     <h2>What's it about?</h2>
     <div class="src-tabs">${seg("mode", [["topic", "Topic"], ["url", "Web page"], ["queue", "Idea queue"], ["auto", "Surprise me"]], f.mode)}</div>
     ${f.mode === "topic" ? `<div class="field"><input type="text" data-f="topic" value="${esc(f.topic)}" placeholder="e.g. Why octopuses have three hearts" aria-label="Topic"><p class="hint">Be as broad or specific as you like — the AI finds the surprising angle.</p></div>`
-    : f.mode === "url" ? `<div class="field"><input type="url" data-f="url" value="${esc(f.url)}" placeholder="https://… an article, blog post or Wikipedia page" aria-label="Web page"><p class="hint">The page's text becomes the script's source material.</p></div>`
+    : f.mode === "url" ? `<div class="field"><input type="url" data-f="url" value="${esc(f.url)}" placeholder="https://… an article, product page, blog post or Wikipedia page" aria-label="Web page"><p class="hint">The page's text (or product info & photos) becomes the script's source material.</p></div>`
     : f.mode === "queue" ? `<p class="hint">Uses the oldest idea from your queue (${i_ideas()} waiting) — plan more on the <a href="#ideas">Ideas</a> page.</p>`
     : `<p class="hint">Picks a fresh topic from your niches and topic sources in .env.</p>`}
   </section>
@@ -299,7 +309,7 @@ function drawForm() {
     </div>
     <div class="field"><label>Aspect</label>${seg("aspect", [["9:16", '<i class="shape s916"></i>9:16 Short'], ["16:9", '<i class="shape s169"></i>16:9 YouTube'], ["1:1", '<i class="shape s11"></i>1:1 Square'], ["4:5", '<i class="shape s45"></i>4:5 Feed']], f.aspect)}</div>
     <div class="grid2">
-      <div class="field"><label>Voice engine</label>${sel("tts", o.tts.map(t => [t, { edge: "Microsoft neural (free)", openai: "OpenAI", elevenlabs: "ElevenLabs", kokoro: "Kokoro (local)", coqui: "Coqui (local)", system: "System voice" }[t] || t]), f.tts)}</div>
+      <div class="field"><label>Voice engine</label>${sel("tts", o.tts.map(t => [t, { edge: "Microsoft neural (free)", openai: "OpenAI", openrouter: "OpenRouter", elevenlabs: "ElevenLabs", kokoro: "Kokoro (local)", coqui: "Coqui (local)", system: "System voice" }[t] || t]), f.tts)}</div>
       <div class="field"><label>${multi ? "Voice A" : "Voice"}</label><input type="text" data-f="voice" list="voices" value="${esc(f.voice)}" placeholder="automatic for the language"></div>
     </div>
     ${multi ? `<div class="field"><label>Voice B (second speaker)</label><input type="text" data-f="voice_b" list="voices" value="${esc(f.voice_b)}" placeholder="automatic contrasting voice"></div>` : ""}
@@ -314,7 +324,7 @@ function drawForm() {
       <div class="field"><label>Colour grade</label>${sel("grade", o.grades.map(g => [g, g]), f.grade)}</div>
       <div class="field"><label>Transitions</label>${sel("transition", o.transitions.map(t => [t, t]), f.transition)}</div>
     </div>
-    <div class="field"><label>Footage & images</label><div class="checks-inline">${o.visuals.map(v => `<label><input type="checkbox" data-visual="${v}"${(f.visuals || []).includes(v) ? " checked" : ""}>${{ pexels: "Pexels", pixabay: "Pixabay", local: "My media folder", pollinations: "AI images (Pollinations, key advised)", "openai-images": "OpenAI images" }[v] || v}</label>`).join("")}</div></div>
+    <div class="field"><label>Footage & images</label><div class="checks-inline">${o.visuals.map(v => `<label><input type="checkbox" data-visual="${v}"${(f.visuals || []).includes(v) ? " checked" : ""}>${{ pexels: "Pexels", pixabay: "Pixabay", local: "My media folder", pollinations: "AI images (Pollinations, key advised)", "openai-images": "OpenAI images", "openrouter-images": "OpenRouter images", "openrouter-video": "OpenRouter video" }[v] || v}</label>`).join("")}</div></div>
     <div class="field"><label class="switch"><input type="checkbox" data-f="music"${f.music ? " checked" : ""}><span>Background music<small>From your music folder, ducked under the voice</small></span></label></div>
   </section>
 
@@ -324,6 +334,12 @@ function drawForm() {
       <div class="field"><label>AI model provider</label>${sel("provider", provs, f.provider)}</div>
       <div class="field"><label>Model</label><input type="text" data-f="model" value="${esc(f.model)}" placeholder="provider default"></div>
     </div>
+    <details class="field"><summary>Choose a model for each stage</summary>
+      <p class="hint">Use OpenRouter IDs such as <span class="mono">openai/gpt-6-luna</span>. Blank uses the configured model.</p>
+      <div class="grid2">${[["planner", "Idea planning"], ["script", "Script writing"], ["review", "Script review"],
+        ["translation", "Translation"], ["clip", "Clip selection"]].map(([stage, label]) =>
+        `<div class="field"><label>${label}</label><input type="text" data-f="model_${stage}" value="${esc(f[`model_${stage}`] || "")}" placeholder="inherit default"></div>`).join("")}</div>
+    </details>
     <div class="field"><label>Script Doctor</label>${seg("review", [["off", "Off"], ["score", "Score only"], ["rewrite", "Score & rewrite"]], f.review)}<p class="hint">A second AI pass grades the hook and pacing, then rewrites weak lines.</p></div>
     <div class="field"><label>Also make it in</label><input type="text" data-f="also_langs" value="${esc(f.also_langs)}" placeholder="e.g. es, hi, pt — translated copies, same footage"></div>
     <div class="grid2">
@@ -444,6 +460,7 @@ function drawEditor() {
     return;
   }
   const multi = MULTI.has(d.style) || d.scenes.some(s => s.speaker === "B");
+  const isProduct = d.style === "product";
   const total = d.scenes.reduce((n, s) => n + words(s.narration), 0);
   const target = Math.round((f.duration || 40) * 2.6);
   box.innerHTML = `<section class="card">
@@ -463,6 +480,7 @@ function drawEditor() {
           <textarea data-i="${n}" data-s="narration" aria-label="Scene ${n + 1} narration">${esc(s.narration)}</textarea>
           <div class="row">
             ${multi ? `<button class="btn ghost sm" type="button" data-act="speaker" data-i="${n}" title="Switch speaker">A/B</button>` : ""}
+            ${isProduct ? `<input type="text" data-i="${n}" data-s="product" value="${esc(s.product || "")}" placeholder="product badge (e.g. 1. Mini Blender)" aria-label="Product badge">` : ""}
             <input type="text" data-i="${n}" data-s="search_query" value="${esc(s.search_query)}" placeholder="footage search" aria-label="Footage search">
             <span class="tools">
               <button class="btn ghost sm" type="button" data-act="up" data-i="${n}" aria-label="Move up">${I.up}</button>
@@ -496,7 +514,7 @@ function drawEditor() {
     if (b.dataset.act === "up" && n > 0) [sc[n - 1], sc[n]] = [sc[n], sc[n - 1]];
     if (b.dataset.act === "down" && n < sc.length - 1) [sc[n + 1], sc[n]] = [sc[n], sc[n + 1]];
     if (b.dataset.act === "speaker") sc[n].speaker = sc[n].speaker === "B" ? "A" : "B";
-    if (b.dataset.act === "add") sc.push({ narration: "", search_query: "", image_prompt: "", speaker: sc.length && sc[sc.length - 1].speaker === "A" && multi ? "B" : "A" });
+    if (b.dataset.act === "add") sc.push({ narration: "", search_query: "", image_prompt: "", product: "", speaker: sc.length && sc[sc.length - 1].speaker === "A" && multi ? "B" : "A" });
     saveDraft();
     drawEditor();
   };
@@ -688,7 +706,8 @@ async function viewIdeas() {
       ${i.video_id ? `<button class="btn ghost sm" type="button" data-open="${i.video_id}">${I.play}Watch</button>` : ""}</div>`).join("")}</div></section>` : ""}`;
   $("#plan-n").oninput = e => { $("#plan-out").textContent = e.target.value; };
   $("#plan-go").onclick = async () => {
-    try { await post("/api/plan", { count: +$("#plan-n").value, niche: $("#plan-niche").value }); toast("Planning ideas… (see Queue)", "info"); tick(); }
+    try { await post("/api/plan", { count: +$("#plan-n").value, niche: $("#plan-niche").value,
+      provider: S.form.provider, model: S.form.model, ...modelPayload() }); toast("Planning ideas… (see Queue)", "info"); tick(); }
     catch (e) { toast(esc(e.message), "bad"); }
   };
   $("#idea-add").onclick = async () => {
@@ -712,7 +731,8 @@ async function refreshInfo() { try { S.info = await get("/api/info"); status(); 
 
 // ------------------------------------------------------------------ CLIP
 function viewClip() {
-  const c = store.get("clip", { source: "", count: 3, crop: "center", upload: false });
+  const c = Object.assign({ source: "", count: 3, crop: "center", upload: false,
+    model: S.info.llm_models?.clip || "", transcription_model: S.info.clip_transcription_model || "" }, store.get("clip", {}));
   $("#main").innerHTML = `
   <div class="page-head"><div><h1>Clip a long video</h1><p>Turn a podcast, interview, talk or stream into Shorts of its best moments.</p></div></div>
   <div class="create">
@@ -722,11 +742,13 @@ function viewClip() {
         <div class="field"><label>Clips</label><div class="range-row"><input type="range" id="c-n" min="1" max="10" value="${c.count}"><output id="c-out">${c.count}</output></div></div>
         <div class="field"><label>Framing</label>${seg("crop", [["center", "Fill (crop)"], ["blur", "Fit + blur"]], c.crop)}</div>
       </div>
+      <div class="field"><label>Model for choosing clips</label><input type="text" id="c-model" value="${esc(c.model)}" placeholder="inherit default"></div>
+      <div class="field"><label>OpenRouter transcription model (optional)</label><input type="text" id="c-transcription-model" value="${esc(c.transcription_model)}" placeholder="e.g. elevenlabs/scribe-v2"><p class="hint">Requires word-level timestamps. Blank uses faster-whisper or OpenAI.</p></div>
       <div class="field"><label class="switch"><input type="checkbox" id="c-up"${c.upload ? " checked" : ""}${S.info.upload ? "" : " disabled"}><span>Upload the clips when done</span></label></div>
       <div class="actions end"><button class="btn primary" id="c-go" type="button">${I.scissors}Find the best moments</button></div>
     </section>
     <section class="card"><h2>How it works</h2><div class="list">
-      <div class="item"><span class="chip accent">1</span><div class="grow"><b>Transcribe</b><small>Word-level timing with faster-whisper (free, local) or OpenAI.</small></div></div>
+      <div class="item"><span class="chip accent">1</span><div class="grow"><b>Transcribe</b><small>Word-level timing with faster-whisper, OpenAI, or the optional OpenRouter model.</small></div></div>
       <div class="item"><span class="chip accent">2</span><div class="grow"><b>AI picks the moments</b><small>Self-contained, 20–58 s, a hook in the first line and a payoff at the end. Each gets a title and a retention score.</small></div></div>
       <div class="item"><span class="chip accent">3</span><div class="grow"><b>Vertical, captioned, loud enough</b><small>9:16 crop or blurred fit, word-by-word captions, hook title, loudness to −14 LUFS.</small></div></div>
     </div></section>
@@ -734,6 +756,8 @@ function viewClip() {
   const save = () => store.set("clip", c);
   $("#c-n").oninput = e => { c.count = +e.target.value; $("#c-out").textContent = c.count; save(); };
   $("#c-src").oninput = e => { c.source = e.target.value; save(); };
+  $("#c-model").oninput = e => { c.model = e.target.value; save(); };
+  $("#c-transcription-model").oninput = e => { c.transcription_model = e.target.value; save(); };
   $("#c-up").onchange = e => { c.upload = e.target.checked; save(); };
   $("#main").addEventListener("click", e => {
     const b = e.target.closest("[data-seg=crop]");
@@ -741,7 +765,9 @@ function viewClip() {
   });
   $("#c-go").onclick = async () => {
     if (!c.source.trim()) return toast("Give a video file path or URL.", "bad");
-    try { await post("/api/clip", { source: c.source.trim(), count: c.count, crop: c.crop, upload: c.upload }); toast("Clipping… follow it in Queue.", "info"); tick(); }
+    try { await post("/api/clip", { source: c.source.trim(), count: c.count, crop: c.crop, upload: c.upload,
+      provider: S.form.provider, model: S.form.model, ...modelPayload(),
+      model_clip: c.model, clip_transcription_model: c.transcription_model }); toast("Clipping… follow it in Queue.", "info"); tick(); }
     catch (e) { toast(esc(e.message), "bad"); }
   };
 }

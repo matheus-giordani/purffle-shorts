@@ -15,14 +15,16 @@ A single video can also be made from a web page (--url) or a local text/markdown
 from __future__ import annotations
 
 import html
+import json
 import logging
 import random
 import re
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 
 from .config import Settings
 from .history import History
@@ -44,6 +46,7 @@ class Topic:
     context: str = ""
     style: str = ""
     idea_id: int | None = None
+    images: list[str] = field(default_factory=list)
 
 
 def _weighted_sources(settings: Settings) -> list[tuple[str, float]]:
@@ -163,7 +166,7 @@ def from_rss(settings: Settings, history: History) -> Topic | None:
 
 
 class _TextExtractor(HTMLParser):
-    """Readable text from an article page: headings, paragraphs and list items, minus navigation."""
+    """Readable text from an article or product page: headings, paragraphs, list items, meta and JSON-LD."""
 
     SKIP = {"script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg", "button"}
     KEEP = {"p", "h1", "h2", "h3", "li", "blockquote"}
@@ -171,14 +174,23 @@ class _TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
+        self.bullets: list[str] = []
         self.title = ""
         self.meta_title = ""
+        self.meta: dict[str, list[str]] = {}
+        self.json_ld: list[str] = []
         self._skip = 0
         self._keep = 0
         self._in_title = False
+        self._in_ld = False
         self._buf: list[str] = []
+        self._ld_buf: list[str] = []
 
     def handle_starttag(self, tag, attrs):
+        a = {k.lower(): (v or "") for k, v in attrs if k}
+        if tag == "script" and "ld+json" in a.get("type", "").lower():
+            self._in_ld = True
+            self._ld_buf = []
         if tag in self.SKIP:
             self._skip += 1
         elif tag in self.KEEP:
@@ -186,11 +198,19 @@ class _TextExtractor(HTMLParser):
         elif tag == "title":
             self._in_title = True
         elif tag == "meta":
-            a = dict(attrs)
-            if a.get("property") == "og:title" and a.get("content"):
-                self.meta_title = a["content"]
+            prop = (a.get("property") or a.get("name") or "").strip().lower()
+            content = a.get("content", "").strip()
+            if prop == "og:title" and content:
+                self.meta_title = content
+            if prop and content:
+                self.meta.setdefault(prop, []).append(content)
 
     def handle_endtag(self, tag):
+        if tag == "script" and self._in_ld:
+            self._in_ld = False
+            raw = "".join(self._ld_buf).strip()
+            if raw:
+                self.json_ld.append(raw)
         if tag in self.SKIP and self._skip:
             self._skip -= 1
         elif tag in self.KEEP and self._keep:
@@ -199,10 +219,14 @@ class _TextExtractor(HTMLParser):
             self._buf = []
             if len(text) > 30 or tag.startswith("h"):
                 self.parts.append(text)
+            elif tag == "li" and len(text) >= 10:
+                self.bullets.append(text)
         elif tag == "title":
             self._in_title = False
 
     def handle_data(self, data):
+        if self._in_ld:
+            self._ld_buf.append(data)
         if self._in_title:
             self.title += data
         elif self._keep and not self._skip:
@@ -216,6 +240,127 @@ def extract_article(page: str) -> tuple[str, str]:
     title = (p.meta_title or p.title).strip()
     title = re.split(r"\s+[|–—-]\s+", title)[0].strip() if title else ""
     return title, "\n".join(dict.fromkeys(t for t in p.parts if t))
+
+
+_PRODUCT_URL = re.compile(
+    r"(?:amazon\.|shopee\.|mercadolivre\.|mercadolibre\.|aliexpress\.|magazineluiza\.|magalu\.|shein\.|temu\.|"
+    r"etsy\.com/listing|/dp/[A-Z0-9]{8,}|/gp/product/|/products?/|/produtos?/)", re.I
+)
+_PRODUCT_TYPES = {"product", "individualproduct", "productgroup", "productmodel"}
+
+
+def _find_ld_products(node) -> list[dict]:
+    out: list[dict] = []
+    if isinstance(node, list):
+        for item in node:
+            out.extend(_find_ld_products(item))
+    elif isinstance(node, dict):
+        t = node.get("@type")
+        types = [str(x).rsplit("/", 1)[-1].lower() for x in (t if isinstance(t, list) else [t]) if x]
+        if any(x in _PRODUCT_TYPES for x in types):
+            out.append(node)
+        for k in ("@graph", "mainEntity", "itemListElement", "item", "hasVariant"):
+            if k in node:
+                out.extend(_find_ld_products(node[k]))
+    return out
+
+
+def _ld_images(val) -> list[str]:
+    if isinstance(val, str):
+        return [val.strip()] if val.strip() else []
+    if isinstance(val, list):
+        out = []
+        for x in val:
+            out.extend(_ld_images(x))
+        return out
+    if isinstance(val, dict):
+        return _ld_images(val.get("url") or val.get("contentUrl") or "")
+    return []
+
+
+def extract_product(page: str, url: str = "") -> tuple[str, str, list[str]] | None:
+    """If ``page`` is an e-commerce / product page, return (title, context, image_urls); else None."""
+    p = _TextExtractor()
+    p.feed(page)
+    ld_products: list[dict] = []
+    for raw in p.json_ld:
+        try:
+            ld_products.extend(_find_ld_products(json.loads(raw)))
+        except Exception:
+            continue
+    og_type = " ".join(p.meta.get("og:type", [])).lower()
+    has_price_meta = bool(p.meta.get("product:price:amount") or p.meta.get("og:price:amount"))
+    is_product = bool(ld_products or "product" in og_type or has_price_meta or _PRODUCT_URL.search(url or ""))
+    if not is_product:
+        return None
+
+    title = (p.meta_title or (p.meta.get("twitter:title") or [""])[0] or p.title).strip()
+    title = re.split(r"\s+[|–—-]\s+", title)[0].strip() if title else ""
+    lines: list[str] = []
+    images: list[str] = []
+
+    for prod in ld_products[:6]:
+        name = _strip_html(str(prod.get("name") or ""))
+        if name and not title:
+            title = name
+        brand = prod.get("brand")
+        brand_name = _strip_html(str(brand.get("name") if isinstance(brand, dict) else brand or ""))
+        offers = prod.get("offers")
+        if isinstance(offers, list):
+            offers = offers[0] if offers else {}
+        price, currency = "", ""
+        if isinstance(offers, dict):
+            price = str(offers.get("price") or offers.get("lowPrice") or "").strip()
+            currency = str(offers.get("priceCurrency") or "").strip()
+        rating = prod.get("aggregateRating") if isinstance(prod.get("aggregateRating"), dict) else {}
+        r_val, r_cnt = rating.get("ratingValue"), rating.get("reviewCount") or rating.get("ratingCount")
+        desc = _strip_html(str(prod.get("description") or ""))
+        header = " · ".join(x for x in [
+            f"Product: {name}" if name else "",
+            f"Brand: {brand_name}" if brand_name else "",
+            f"Price: {currency} {price}".strip() if price else "",
+            f"Rating: {r_val}/5 ({r_cnt} reviews)" if r_val and r_cnt else (f"Rating: {r_val}/5" if r_val else ""),
+        ] if x)
+        if header:
+            lines.append(header)
+        if desc:
+            lines.append(desc)
+        images.extend(_ld_images(prod.get("image")))
+
+    if not lines:
+        price = (p.meta.get("product:price:amount") or p.meta.get("og:price:amount") or [""])[0]
+        currency = (p.meta.get("product:price:currency") or p.meta.get("og:price:currency") or [""])[0]
+        brand = (p.meta.get("product:brand") or [""])[0]
+        if title:
+            lines.append(f"Product: {title}")
+        if brand or price:
+            lines.append(" · ".join(x for x in [
+                f"Brand: {brand}" if brand else "",
+                f"Price: {currency} {price}".strip() if price else "",
+            ] if x))
+
+    for key in ("og:description", "description", "twitter:description"):
+        for d in p.meta.get(key, []):
+            clean_d = _strip_html(d)
+            if clean_d and clean_d not in lines:
+                lines.append(clean_d)
+    for b in p.bullets[:12]:
+        if b not in lines:
+            lines.append(f"- {b}")
+    for part in p.parts:
+        if part not in lines:
+            lines.append(part)
+
+    for key in ("og:image", "twitter:image"):
+        images.extend(p.meta.get(key, []))
+    clean_imgs: list[str] = []
+    for img in images:
+        full = urljoin(url, img) if url else img
+        if re.match(r"^https?://", full) and full not in clean_imgs:
+            clean_imgs.append(full)
+
+    context = "\n".join(dict.fromkeys(ln for ln in lines if ln)).strip()
+    return (title, context, clean_imgs) if (title or context) else None
 
 
 _REDDIT_POST = re.compile(r"^https?://(?:www\.|old\.|new\.)?reddit\.com/r/\w+/comments/\w+", re.I)
@@ -245,14 +390,18 @@ def from_reddit_post(url: str) -> Topic:
 
 
 def from_url(url: str) -> Topic:
-    """Turn a web page (article, blog post, docs page, Wikipedia, a Reddit post) into a topic with the page
-    as context."""
+    """Turn a web page (article, blog post, docs page, Wikipedia, a Reddit post, or a product page) into a
+    topic with the page as context."""
     if not re.match(r"^https?://", url):
         raise ValueError(f"not a web address: {url}")
     if _REDDIT_POST.match(url):
         return from_reddit_post(url)
     r = http().get(url, timeout=30, headers={"Accept": "text/html,application/xhtml+xml"})
     raise_for_status(r, f"fetch {url[:60]}")
+    prod = extract_product(r.text, url)
+    if prod and len(prod[1]) >= 40:
+        subj, ctx, imgs = prod
+        return Topic(subj or url, "url", key=f"url:{url}", context=ctx[:6000], style="product", images=imgs[:8])
     title, text = extract_article(r.text)
     if len(text) < 200:
         raise ValueError(f"{url}: couldn't find readable article text on that page")

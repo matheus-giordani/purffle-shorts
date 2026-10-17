@@ -7,7 +7,7 @@ client_secret*.json
 token.json
 token.pickle
 *.pickle
-
+.mypy_cache/
 # Python
 __pycache__/
 *.py[cod]

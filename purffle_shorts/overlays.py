@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -764,6 +765,144 @@ def post_card_png(settings: Settings, font_path: Path | None, community: str, us
     return dest, (W - cw) // 2, y0
 
 
+# ------------------------------------------------------------------------------------------ product showcase badges
+@dataclass
+class ProductBadge:
+    label: str
+    start: float
+    end: float
+
+
+class ProductBadges:
+    """Top-of-screen product pill badges ('1. Varal Desmontável' / 'PORTABLE MINI BLENDER') shown over each
+    product scene while leaving the center of the frame clear for the product demonstration."""
+
+    def __init__(self, settings: Settings, font_path: Path | None):
+        self.s = settings
+        W, H, U = settings.width, settings.height, settings.unit
+        self.bw = int(min(W * 0.90, U * 0.96)) // 2 * 2
+        self.bh = int(U * 0.16) // 2 * 2
+        self.x = (W - self.bw) // 2
+        self.y = int(H * 0.12)
+        self.font_path = str(font_path) if font_path else None
+        self.by_char = settings.language.split("-")[0] in NO_SPACE_LANGS
+
+    def render(self, label: str, idx: int = 0, scale: float = 1.0) -> Image.Image:
+        U = self.s.unit
+        img = Image.new("RGBA", (self.bw, self.bh), (0, 0, 0, 0))
+        text = label.strip()
+        if not text:
+            return img
+        m = re.match(r"^(?:#?\s*(\d{1,2})\s*[.:\-–)]\s*)(.+)$", text)
+        num, title = (m.group(1), m.group(2).strip()) if m else ("", text)
+        accent = _rgba(CARD_ACCENTS[idx % len(CARD_ACCENTS)])
+        ink = (20, 20, 26, 255)
+
+        size = max(12, int(U * 0.046 * scale))
+        pad_x = max(8, int(size * 0.55))
+        pad_y = max(6, int(size * 0.34))
+        tag_gap = max(6, int(size * 0.35))
+        for _ in range(8):
+            font = load_font(self.font_path, size, weight=700)
+            num_w = int(font.getlength(num) + size * 0.75) if num else max(6, int(size * 0.22))
+            max_tw = max(40, self.bw - 2 * pad_x - num_w - tag_gap - 8)
+            lines = _wrap(title, font, max_tw, self.by_char)
+            if len(lines) <= 2 and all(font.getlength(ln) <= max_tw for ln in lines):
+                break
+            size = max(10, int(size * 0.9))
+
+        ascent, descent = font.getmetrics()
+        line_h = ascent + descent + max(1, int(size * 0.06))
+        text_h = line_h * len(lines)
+        tw = int(max(font.getlength(ln) for ln in lines))
+        pw = min(self.bw - 4, num_w + tag_gap + tw + 2 * pad_x)
+        ph = min(self.bh - 4, max(text_h + 2 * pad_y, int(size * 1.45)))
+        x0 = (self.bw - pw) // 2
+        y0 = (self.bh - ph) // 2
+        r = ph // 2
+
+        d = ImageDraw.Draw(img)
+        # Subtle drop shadow + crisp white pill
+        sh = max(2, int(U * 0.005))
+        d.rounded_rectangle((x0 + sh, min(self.bh - 1, y0 + sh), min(self.bw - 1, x0 + pw + sh),
+                             min(self.bh - 1, y0 + ph + sh)), radius=r, fill=(0, 0, 0, 85))
+        d.rounded_rectangle((x0, y0, x0 + pw, y0 + ph), radius=r, fill=(255, 255, 255, 248),
+                            outline=(0, 0, 0, 45), width=max(1, int(U * 0.003)))
+
+        if num:
+            tag_h = max(12, ph - 2 * max(3, int(pad_y * 0.45)))
+            tag_w = max(tag_h, num_w)
+            tx0 = x0 + max(4, int(pad_x * 0.55))
+            ty0 = y0 + (ph - tag_h) // 2
+            d.rounded_rectangle((tx0, ty0, tx0 + tag_w, ty0 + tag_h), radius=tag_h // 2, fill=accent)
+            num_font = load_font(self.font_path, max(10, int(size * 0.88)), weight=800)
+            d.text((tx0 + tag_w / 2, ty0 + tag_h / 2), num, font=num_font, anchor="mm", fill=(255, 255, 255, 255))
+            text_x = tx0 + tag_w + tag_gap
+        else:
+            bar_w = max(4, int(size * 0.20))
+            bar_h = max(10, ph - 2 * pad_y)
+            bx0 = x0 + pad_x
+            by0 = y0 + (ph - bar_h) // 2
+            d.rounded_rectangle((bx0, by0, bx0 + bar_w, by0 + bar_h), radius=bar_w // 2, fill=accent)
+            text_x = bx0 + bar_w + tag_gap
+
+        ty = y0 + (ph - text_h) / 2
+        for ln in lines:
+            d.text((text_x, ty + ascent), ln, font=font, anchor="ls", fill=ink)
+            ty += line_h
+        return img
+
+    def build(self, badges: list[ProductBadge], total: float, out_dir: Path, start_after: float = 0.0) -> Path:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        frame = 1.0 / self.s.fps
+        blank = out_dir / "blank.png"
+        Image.new("RGBA", (self.bw, self.bh), (0, 0, 0, 0)).save(blank)
+        entries: list[tuple[str, float]] = []
+        t, n = 0.0, 0
+
+        def add(name: str, until: float):
+            nonlocal t
+            if until - t > 0.001:
+                entries.append((name, until - t))
+                t = until
+
+        for idx, b in enumerate(badges):
+            label = b.label.strip()
+            s0 = max(b.start, start_after, t)
+            e0 = min(b.end, total)
+            if not label or e0 - s0 < 0.15:
+                continue
+            add(blank.name, s0)
+            for sc in (0.90, 1.04):
+                n += 1
+                pop_name = f"badge{n:04d}.png"
+                self.render(label, idx, scale=sc).save(out_dir / pop_name, compress_level=1)
+                add(pop_name, min(t + frame, e0))
+            n += 1
+            name = f"badge{n:04d}.png"
+            self.render(label, idx, scale=1.0).save(out_dir / name, compress_level=1)
+            add(name, e0)
+        add(blank.name, total)
+        if not entries:
+            entries.append((blank.name, max(total, frame)))
+        lines = ["ffconcat version 1.0"]
+        for name, dur in entries:
+            lines += [f"file '{name}'", f"duration {dur:.4f}"]
+        lines.append(f"file '{entries[-1][0]}'")
+        playlist = out_dir / "badges.ffconcat"
+        playlist.write_text("\n".join(lines) + "\n")
+        log.info("Product badges: %d badge(s), %d states", len(badges), n)
+        return playlist
+
+
+def product_badge_png(settings: Settings, font_path: Path | None, label: str, dest: Path,
+                      idx: int = 0) -> tuple[Path, int, int]:
+    """Render a single product badge PNG and return (png, x, y)."""
+    pb = ProductBadges(settings, font_path)
+    pb.render(label, idx=idx).save(dest)
+    return dest, pb.x, pb.y
+
+
 # ------------------------------------------------------------------------------------------ plan
 @dataclass
 class OverlayPlan:
@@ -777,18 +916,20 @@ class OverlayPlan:
     cta_from: float = 0.0
     ass: Path | None = None                    # subtitles file (ass)
     fonts_dir: Path | None = None
-    chat: tuple[Path, int, int] | None = None  # (ffconcat playlist, x, y) for chat stories
-    card: tuple[Path, int, int] | None = None  # (png, x, y) post card for Reddit-style stories
+    chat: tuple[Path, int, int] | None = None    # (ffconcat playlist, x, y) for chat stories
+    card: tuple[Path, int, int] | None = None    # (png, x, y) post card for Reddit-style stories
     card_until: float = 0.0
+    badges: tuple[Path, int, int] | None = None  # (ffconcat playlist, x, y) for product showcases
 
 
 def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_text: str, work: Path, *,
                    labels: dict[str, str] | None = None, chat: list[ChatMessage] | None = None,
                    contact: str = "", card: tuple[str, str, str] | None = None,
-                   card_until: float = 0.0) -> OverlayPlan:
+                   card_until: float = 0.0, badges: list[ProductBadge] | None = None) -> OverlayPlan:
     """labels: speaker name tags over the captions (dialogue). chat: render a text-message screen
     instead of captions (the messages are the captions). card: (community, poster, title) of a post card
-    shown until ``card_until`` in place of the hook title (pass captions that start after it)."""
+    shown until ``card_until`` in place of the hook title (pass captions that start after it).
+    badges: per-scene product pills shown at the top of the frame in product showcase videos."""
     style = CAPTION_STYLES.get(settings.caption_style, CAPTION_STYLES["bold"])
     if not settings.caption_uppercase and style.font == "anton":
         style = replace(style, font="sans")
@@ -812,6 +953,13 @@ def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_t
             log.warning("This Pillow build can't shape %s text; the post card may look wrong", settings.language)
         sans, _ = resolve_font(settings, "sans")
         card_plan = post_card_png(settings, sans, *card, work / "card.png")
+    badge_plan = None
+    if badges:
+        if settings.language.split("-")[0] in COMPLEX_LANGS and not features.check("raqm"):
+            log.warning("This Pillow build can't shape %s text; product badges may look wrong", settings.language)
+        sans, _ = resolve_font(settings, "sans")
+        pb = ProductBadges(settings, sans)
+        badge_plan = (pb.build(badges, total, work / "badges", start_after=hook_until), pb.x, pb.y)
 
     if needs_ass(settings) and ffmpeg.has_filter("ass"):
         fonts = work / "fonts"
@@ -824,9 +972,10 @@ def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_t
                         hook_y=hook_y, cta_y=0.10 if chat else 0.30, labels=labels)
         log.info("Captions: libass renderer (%s, font %s)", settings.language, family)
         return OverlayPlan("ass", ass=ass, fonts_dir=fonts, chat=chat_plan, card=card_plan,
-                           card_until=card_until if card_plan else 0.0)
+                           card_until=card_until if card_plan else 0.0, badges=badge_plan)
 
-    plan = OverlayPlan("pillow", chat=chat_plan, card=card_plan, card_until=card_until if card_plan else 0.0)
+    plan = OverlayPlan("pillow", chat=chat_plan, card=card_plan, card_until=card_until if card_plan else 0.0,
+                       badges=badge_plan)
     if chunks:
         caps = PillowCaptions(settings, style, font_path, labels)
         plan.captions, plan.captions_y = caps.build(chunks, total, work / "captions"), caps.band_y

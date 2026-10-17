@@ -28,9 +28,10 @@ log = logging.getLogger("purffle")
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 _STYLE = {"type": "string", "enum": ["auto", "facts", "story", "listicle", "myth", "quiz", "motivational", "news",
-                                     "explainer", "dialogue", "chat", "reddit"],
+                                     "explainer", "dialogue", "chat", "reddit", "product"],
           "description": "Video format. dialogue = two voices talking; chat = animated text-message story; "
-                         "reddit = first-person story that opens on a post card."}
+                         "reddit = first-person story that opens on a post card; "
+                         "product = product showcase with top product badges."}
 TOOLS: list[dict] = [
     {"name": "make_short",
      "description": "Write, voice and render a complete short video (script, voice, footage, captions, music) and "
@@ -120,7 +121,8 @@ class Server:
         from .planner import plan_ideas
         studio = Studio(self.settings)
         niches = [a["niche"]] if a.get("niche") else None
-        ideas = plan_ideas(studio.llm, self.settings, studio.history, int(a.get("count") or 10), niches)
+        ideas = plan_ideas(studio.llm_for_stage("planner"), self.settings, studio.history,
+                           int(a.get("count") or 10), niches)
         return "\n".join(f"#{i['id']} [{i['style'] or 'auto'}] {i['subject']} — {i['notes']}" for i in ideas) \
             or "No new ideas."
 

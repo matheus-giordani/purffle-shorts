@@ -14,7 +14,7 @@ from .config import Settings
 
 def checks(s: Settings) -> list[dict]:
     from . import ffmpeg
-    from .llm import LLMError, build_provider, ollama_has, ollama_models, resolve_provider_name
+    from .llm import LLMConfigError, LLMError, build_provider, ollama_has, ollama_models, resolve_provider_name
     out: list[dict] = []
 
     def add(ok: bool | None, label: str, detail: str = "") -> None:
@@ -32,22 +32,30 @@ def checks(s: Settings) -> list[dict]:
         add(False, "ffmpeg", str(e))
     try:
         name = resolve_provider_name(s)
-        prov = build_provider(name, s, s.llm_model)
-        model = getattr(prov, "model", s.llm_model or "default")
-        installed = ollama_models(prov.base_url) if name == "ollama" else []
-        if installed is None:
-            add(False, "LLM", f"ollama is not running at {prov.base_url} (start it with: ollama serve)")
-        elif name == "ollama" and not ollama_has(installed, model):
-            add(False, "LLM", f"ollama model '{model}' is not pulled. Run: ollama pull {model}"
-                + (f"  (installed: {', '.join(installed)})" if installed else ""))
-        else:
-            add(True, "LLM", f"{name} (model: {model})"
-                + (f", fallbacks: {', '.join(s.llm_fallbacks)}" if s.llm_fallbacks else ""))
+        stages = ("planner", "script", "review", "translation", "clip")
+        configured = {stage: getattr(s, f"llm_model_{stage}") or s.llm_model for stage in stages}
+        distinct_models = list(dict.fromkeys(configured.values()))
+        messages = []
+        for requested in distinct_models:
+            prov = build_provider(name, s, requested)
+            model = getattr(prov, "model", requested or "default")
+            installed = ollama_models(prov.base_url) if name == "ollama" else []
+            if installed is None:
+                raise LLMConfigError(f"ollama is not running at {prov.base_url} (start it with: ollama serve)")
+            if name == "ollama" and not ollama_has(installed, model):
+                raise LLMConfigError(f"ollama model '{model}' is not pulled. Run: ollama pull {model}"
+                                     + (f"  (installed: {', '.join(installed)})" if installed else ""))
+            labels = [stage for stage, selected in configured.items() if selected == requested]
+            messages.append(f"{','.join(labels) or 'default'}: {model or 'provider default'}")
+        add(True, "LLM", f"{name} ({'; '.join(messages)})"
+            + (f", fallbacks: {', '.join(s.llm_fallbacks)}" if s.llm_fallbacks else ""))
     except LLMError as e:
         add(False, "LLM", str(e))
     add(True, "Voice", s.tts_engine + (f" / {s.tts_voice}" if s.tts_voice else ""))
     if s.tts_engine == "elevenlabs" and not s.elevenlabs_api_key:
         add(False, "ElevenLabs key", "ELEVENLABS_API_KEY missing")
+    if s.tts_engine == "openrouter" and not s.openrouter_api_key:
+        add(False, "OpenRouter TTS key", "OPENROUTER_API_KEY missing")
     usable = 0
     for src in s.visual_sources:
         if src == "pollinations" and not s.pollinations_api_key:
@@ -55,6 +63,7 @@ def checks(s: Settings) -> list[dict]:
                 "few minutes, so most scenes fall back to gradients. Set POLLINATIONS_API_KEY")
             continue
         need = {"pexels": s.pexels_api_key, "pixabay": s.pixabay_api_key, "openai-images": s.openai_api_key,
+                "openrouter-images": s.openrouter_api_key, "openrouter-video": s.openrouter_api_key,
                 "pollinations": s.pollinations_api_key}.get(src, "n/a")
         usable += bool(need)
         add(True if need else None, f"Visual source {src}",
@@ -72,9 +81,13 @@ def checks(s: Settings) -> list[dict]:
     add(None, "Output", f"{s.width}x{s.height} ({s.orientation})"
         + (f", also in {', '.join(s.also_languages)}" if s.also_languages else ""))
     has_fw = importlib.util.find_spec("faster_whisper") is not None
-    add(True if has_fw or s.openai_api_key else None, "Clipping long videos",
-        "faster-whisper installed" if has_fw else ("OpenAI transcription" if s.openai_api_key
-                                                    else "needs: pip install faster-whisper"))
+    if s.clip_transcription_model:
+        add(bool(s.openrouter_api_key), "Clipping transcription",
+            f"OpenRouter model {s.clip_transcription_model}" if s.openrouter_api_key else "OPENROUTER_API_KEY missing")
+    else:
+        add(True if has_fw or s.openai_api_key else None, "Clipping long videos",
+            "faster-whisper installed" if has_fw else ("OpenAI transcription" if s.openai_api_key
+                                                        else "needs: pip install faster-whisper"))
     add(None, "Clip from URLs", "yt-dlp installed" if importlib.util.find_spec("yt_dlp") else "pip install yt-dlp")
     if s.notify_webhook:
         add(True, "Notifications", "webhook set")

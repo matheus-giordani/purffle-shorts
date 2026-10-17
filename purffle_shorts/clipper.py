@@ -3,9 +3,10 @@
     purffle-shorts clip talk.mp4 --count 3
     purffle-shorts clip "https://..." --crop blur        (URLs need: pip install yt-dlp)
 
-The audio is transcribed with word timings (faster-whisper locally, or OpenAI's API), the LLM reads the
-timestamped transcript and picks the moments that work on their own — a hook in the first seconds and a
-complete thought at the end — and each one is cropped to 9:16, captioned word by word and rendered.
+The audio is transcribed with word timings (faster-whisper locally, OpenAI's API, or an optional OpenRouter
+model), the LLM reads the timestamped transcript and picks the moments that work on their own — a hook in the
+first seconds and a complete thought at the end — and each one is cropped to 9:16, captioned word by word and
+rendered.
 
 Only clip videos you own or have permission to reuse.
 """
@@ -29,7 +30,7 @@ from .overlays import build_overlays
 from .render import _encode_args, compose, extract_frame
 from .script import normalize
 from .timing import Word, caption_chunks, srt
-from .utils import PermanentError, slugify
+from .utils import PermanentError, http, raise_for_status, slugify
 
 log = logging.getLogger("purffle")
 
@@ -116,6 +117,43 @@ def transcribe(video: Path, work: Path, settings: Settings) -> list[Word]:
     audio = work / "audio.mp3"
     ffmpeg.run(["-i", str(video), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(audio)], label="extract audio")
     lang = settings.language.split("-")[0]
+    if settings.clip_transcription_model:
+        if not settings.openrouter_api_key:
+            raise PermanentError("CLIP_TRANSCRIPTION_MODEL needs OPENROUTER_API_KEY")
+        if audio.stat().st_size > 24 * 1024 * 1024:
+            raise PermanentError("That audio is too large for OpenRouter transcription (25 MB limit). "
+                                 "Install faster-whisper or shorten the source.")
+        with open(audio, "rb") as f:
+            r = http().post(
+                "https://openrouter.ai/api/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
+                         "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts",
+                         "X-Title": "PurffleShorts"},
+                data={"model": settings.clip_transcription_model, "language": lang,
+                      "response_format": "verbose_json", "timestamp_granularities[]": "word"},
+                files={"file": (audio.name, f, "audio/mpeg")}, timeout=180)
+        raise_for_status(r, "OpenRouter transcription")
+        data = r.json()
+        if not isinstance(data, dict):
+            raise PermanentError("OpenRouter transcription did not return a JSON object")
+        segments = [segment for segment in data.get("segments") or [] if isinstance(segment, dict)]
+        raw_words = data.get("words") or [w for segment in segments for w in segment.get("words") or []]
+        words = []
+        for item in raw_words:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("word") or item.get("text") or "").strip()
+            try:
+                start, end = float(item["start"]), float(item["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if text and end >= start:
+                words.append(Word(text, start, end))
+        if not words:
+            raise PermanentError("The selected transcription model returned no word timestamps. "
+                                 "Choose a model with word-level timestamps or use faster-whisper.")
+        log.info("Transcribed %d words with OpenRouter (%s)", len(words), settings.clip_transcription_model)
+        return words
     try:
         words = tts._align_faster_whisper(audio, lang)
         log.info("Transcribed %d words with faster-whisper", len(words))
@@ -296,7 +334,7 @@ def make_clips(studio, src: str, *, count: int = 3, crop: str = "center", upload
         sents = sentences(words)
         studio._step("script", "finding the best moments")
         try:
-            llm = studio.llm
+            llm = studio.llm_for_stage("clip")
         except LLMConfigError as e:
             log.warning("No LLM is configured, so the clips are evenly spaced moments instead of the best ones "
                         "(%s)", str(e).split(".")[0])

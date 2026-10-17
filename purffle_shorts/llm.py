@@ -70,6 +70,8 @@ _CLAUDE_FALLBACK_MODELS = re.compile(r"^claude-(opus-5|fable-5)")
 def _key_for(preset: Preset, settings: Settings) -> str:
     if preset.name == "custom":
         return settings.llm_api_key
+    if preset.name == "openrouter" and settings.openrouter_api_key:
+        return settings.openrouter_api_key
     for env in preset.key_envs:
         if os.getenv(env):
             return os.environ[env]

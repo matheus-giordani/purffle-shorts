@@ -53,7 +53,8 @@ EDGE_VOICES_B = {
     "vi": "vi-VN-HoaiMyNeural", "th": "th-TH-PremwadeeNeural", "fil": "fil-PH-BlessicaNeural",
     "uk": "uk-UA-PolinaNeural", "sv": "sv-SE-SofieNeural",
 }
-SECOND_VOICE = {"openai": "nova", "elevenlabs": "21m00Tcm4TlvDq8ikWAM", "kokoro": "af_heart"}
+SECOND_VOICE = {"openai": "nova", "openrouter": "Puck", "elevenlabs": "21m00Tcm4TlvDq8ikWAM",
+                "kokoro": "af_heart"}
 LINE_GAP = 0.18  # silence between two speakers' lines
 
 KOKORO_LANG = {"en": ("a", "am_michael"), "es": ("e", "em_alex"), "fr": ("f", "ff_siwis"),
@@ -131,6 +132,25 @@ def _openai(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
         path.write_bytes(r.content)
 
     with_retries(_do, attempts=3, label="OpenAI TTS")
+    return path, [], voice
+
+
+def _openrouter(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], str]:
+    if not settings.openrouter_api_key:
+        raise PermanentError("TTS_ENGINE=openrouter needs OPENROUTER_API_KEY")
+    model = settings.tts_model or "google/gemini-3.8-flash-tts"
+    voice = _pick_voice(settings, "Kore")
+    path = out / "voice.mp3"
+    r = http().post("https://openrouter.ai/api/v1/audio/speech", timeout=180,
+                    headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
+                             "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts",
+                             "X-Title": "PurffleShorts"},
+                    json={"model": model, "input": text, "voice": voice,
+                          "instructions": settings.tts_instructions, "response_format": "mp3"})
+    raise_for_status(r, "OpenRouter TTS")
+    if not r.content:
+        raise RuntimeError("OpenRouter TTS returned empty audio")
+    path.write_bytes(r.content)
     return path, [], voice
 
 
@@ -249,7 +269,8 @@ def _silent(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
     return path, [], "silent"
 
 
-_ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "elevenlabs": _elevenlabs, "kokoro": _kokoro,
+_ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "openrouter": _openrouter,
+                 "elevenlabs": _elevenlabs, "kokoro": _kokoro,
                  "coqui": _coqui, "system": _system, "silent": _silent}
 
 
@@ -341,7 +362,7 @@ def synthesize_lines(lines: list[tuple[str, str]], out_dir: Path, settings: Sett
     def one(i: int, speaker: str, text: str) -> Speech:
         return synthesize(text, out_dir / f"line{i:02d}", cfg[speaker])
 
-    workers = 4 if settings.tts_engine in ("edge", "openai", "elevenlabs") else 1
+    workers = 4 if settings.tts_engine in ("edge", "openai", "openrouter", "elevenlabs") else 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         parts = list(ex.map(lambda a: one(*a), [(i, sp, t) for i, (sp, t) in enumerate(lines)]))
 

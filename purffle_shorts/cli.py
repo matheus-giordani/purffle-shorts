@@ -45,17 +45,17 @@ def _common(p: argparse.ArgumentParser) -> None:
     g.add_argument("--source", choices=["niche", "trending", "wikipedia", "reddit", "rss", "file", "queue"],
                    help="topic source")
     g.add_argument("--niche", action="append", help="niche to pick topics from (repeatable)")
-    g.add_argument("--style", help="facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat|reddit|auto")
+    g.add_argument("--style", help="facts|story|listicle|myth|quiz|motivational|news|explainer|dialogue|chat|reddit|product|auto")
     g.add_argument("--lang", dest="language", help="language code, e.g. en, es, hi, ta, fr, ja")
     g.add_argument("--duration", dest="target_seconds", type=int, help="target length in seconds (15-170)")
     g.add_argument("--provider", dest="llm_provider", help="LLM provider (see `providers`)")
     g.add_argument("--model", dest="llm_model", help="LLM model name")
-    g.add_argument("--tts", dest="tts_engine", help="edge|openai|elevenlabs|kokoro|coqui|system|silent")
+    g.add_argument("--tts", dest="tts_engine", help="edge|openai|openrouter|elevenlabs|kokoro|coqui|system|silent")
     g.add_argument("--voice", dest="tts_voice", help="voice name/id (comma list = rotate)")
     g.add_argument("--voice-b", dest="tts_voice_b", help="second speaker's voice (dialogue and chat formats)")
     g.add_argument("--no-review", action="store_true", help="skip the Script Doctor's second pass")
     g.add_argument("--also-lang", help="also make translated copies, e.g. es,hi (same footage)")
-    g.add_argument("--visuals", help="comma list: pexels,pixabay,local,openai-images,pollinations")
+    g.add_argument("--visuals", help="comma list: pexels,pixabay,local,openai-images,openrouter-images,openrouter-video,pollinations")
     r = p.add_argument_group("look & output")
     r.add_argument("--caption-style", help="bold|boxed|neon|clean|karaoke|minimal")
     r.add_argument("--caption-position", help="upper|center|lower")
@@ -241,7 +241,7 @@ def cmd_plan(args, s: Settings) -> int:
     from .planner import plan_ideas
     studio = Studio(s)
     insights = analytics.insights(studio.history) if s.learn_from_stats else ""
-    ideas = plan_ideas(studio.llm, s, studio.history, args.count, args.niche, insights)
+    ideas = plan_ideas(studio.llm_for_stage("planner"), s, studio.history, args.count, args.niche, insights)
     for i in ideas:
         print(f"{i['id']:>4}  {i['style'] or 'auto':12} {i['subject']}\n      {i['notes']}")
     queued = len(studio.history.ideas("pending"))

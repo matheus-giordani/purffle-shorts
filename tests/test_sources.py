@@ -130,3 +130,37 @@ def test_reddit_post_link_is_read_from_its_feed(monkeypatch):
     assert t.subject == "TIFU by tipping my pizza driver $100" and t.style == "reddit"
     assert "I'm still thinking about it." in t.context
     assert "submitted by" not in t.context and "not the post" not in t.context
+
+
+PRODUCT_PAGE = """<html><head>
+<title>Waterproof Outlet Cover Box | HomeStore</title>
+<meta property="og:type" content="product">
+<meta property="og:image" content="https://cdn.example.com/outlet-1.jpg">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Product",
+  "name": "Waterproof Outlet Cover Box",
+  "brand": {"@type": "Brand", "name": "SafeHome"},
+  "description": "Self-adhesive splash proof cover for bathroom and kitchen power sockets.",
+  "image": ["https://cdn.example.com/outlet-1.jpg", "https://cdn.example.com/outlet-2.jpg"],
+  "offers": {"@type": "Offer", "price": "12.99", "priceCurrency": "USD"},
+  "aggregateRating": {"@type": "AggregateRating", "ratingValue": "4.8", "reviewCount": "1420"}
+}
+</script></head><body>
+<ul>
+  <li>90-degree flip cover blocks water splashes while plugs stay connected</li>
+  <li>Peel-and-stick installation with no drilling required</li>
+</ul>
+</body></html>"""
+
+
+def test_product_url_extracts_metadata_and_images(monkeypatch):
+    url = "https://store.example.com/products/waterproof-outlet-cover"
+    monkeypatch.setattr(T, "http", lambda: Session({url: PRODUCT_PAGE}))
+    t = T.from_url(url)
+    assert t.style == "product" and t.subject == "Waterproof Outlet Cover Box"
+    assert "SafeHome" in t.context and "USD 12.99" in t.context and "4.8/5" in t.context
+    assert "90-degree flip cover" in t.context
+    assert t.images == ["https://cdn.example.com/outlet-1.jpg", "https://cdn.example.com/outlet-2.jpg"]
+

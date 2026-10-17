@@ -78,6 +78,38 @@ def test_post_card_fits_every_shape(settings, tmp_path):
 
 
 @needs_ffmpeg
+def test_product_showcase_renders_top_badges_and_lower_captions(fast, spy_overlays):
+    r = P.Studio(fast).make(style="product")
+    assert r.ok, r.error
+    kw = spy_overlays[0]
+    badges = kw["badges"]
+    assert badges and len(badges) == 3
+    assert [b.label for b in badges] == [
+        "1. Waterproof Outlet Cover",
+        "2. Thermal Hair Brush",
+        "3. Portable Mini Blender",
+    ]
+    assert all(b.end > b.start >= 0 for b in badges)
+    assert all(b.start >= a.end - 0.01 for a, b in zip(badges, badges[1:]))
+    meta = json.loads((r.folder / "metadata.json").read_text())
+    assert meta["style"] == "product" and len(meta["cast"]) == 3
+    assert ffmpeg.probe(r.video)["duration"] > 15
+
+
+def test_product_badge_fits_every_shape(settings, tmp_path):
+    from PIL import Image
+
+    from purffle_shorts.overlays import product_badge_png
+    long_label = "1. Ultra Compact Waterproof Bathroom Outlet Cover Box With Cord Slot"
+    for size in [(1080, 1920), (1920, 1080), (1080, 1080)]:
+        s = settings.with_overrides(resolution=size)
+        png, x, y = product_badge_png(s, None, long_label, tmp_path / f"badge_{size[0]}x{size[1]}.png")
+        w, h = Image.open(png).size
+        assert 0 <= x and x + w <= size[0] and 0 <= y and y + h <= size[1], (size, x, y, w, h)
+
+
+
+@needs_ffmpeg
 def test_landscape_video_is_not_a_short(fast):
     s = fast.with_overrides(resolution=(640, 360))
     r = P.Studio(s).make()

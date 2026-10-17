@@ -130,7 +130,8 @@ class StudioServer:
         ov: dict = {
             "style": _choice(p.get("style"), STYLES),
             "language": (str(p.get("language") or "").strip().lower()[:8] or None),
-            "tts_engine": _choice(p.get("tts"), ("edge", "openai", "elevenlabs", "kokoro", "coqui", "system")),
+            "tts_engine": _choice(p.get("tts"),
+                                   ("edge", "openai", "openrouter", "elevenlabs", "kokoro", "coqui", "system")),
             "tts_voice": str(p.get("voice") or "").strip()[:200] or None,
             "tts_voice_b": str(p.get("voice_b") or "").strip()[:200] or None,
             "caption_style": _choice(p.get("caption_style"), CAPTION_STYLES),
@@ -141,6 +142,12 @@ class StudioServer:
             "llm_model": str(p.get("model") or "").strip()[:120] or None,
             "script_review": _choice(p.get("review"), ("off", "score", "rewrite")),
         }
+        for stage in ("planner", "script", "review", "translation", "clip"):
+            key = f"model_{stage}"
+            if key in p:
+                ov[f"llm_model_{stage}"] = str(p.get(key) or "").strip()[:120]
+        if "clip_transcription_model" in p:
+            ov["clip_transcription_model"] = str(p.get("clip_transcription_model") or "").strip()[:120]
         if p.get("duration"):
             try:
                 ov["target_seconds"] = max(10, min(170, int(p["duration"])))
@@ -200,7 +207,8 @@ class StudioServer:
         if job.kind == "plan":
             from .planner import plan_ideas
             niches = [p["niche"].strip()] if str(p.get("niche") or "").strip() else None
-            ideas = plan_ideas(studio.llm, s, studio.history, int(p.get("count") or 10), niches)
+            ideas = plan_ideas(studio.llm_for_stage("planner"), s, studio.history,
+                               int(p.get("count") or 10), niches)
             job.result = {"ideas": len(ideas)}
             return bool(ideas)
         if job.kind == "clip":
@@ -294,6 +302,9 @@ class StudioServer:
         stats = h.stats()
         views = sum(r.get("views") or 0 for r in h.recent(1000))
         return {"version": __version__, "llm": llm, "llm_ok": llm_ok, "tts": s.tts_engine,
+                "llm_models": {stage: getattr(s, f"llm_model_{stage}") for stage in
+                               ("planner", "script", "review", "translation", "clip")},
+                "clip_transcription_model": s.clip_transcription_model,
                 "voice": s.tts_voice or "auto", "visuals": s.visual_sources, "upload": s.upload,
                 "privacy": s.privacy, "quota_left": self.studio.quota_left(), "daily_limit": s.daily_upload_limit,
                 "language": s.language, "caption_style": s.caption_style, "caption_position": s.caption_position,
@@ -315,8 +326,9 @@ class StudioServer:
                 "transitions": ["random", "none", *TRANSITIONS],
                 "providers": [{"name": n, "label": p.label, "ready": n in ready or p.local}
                               for n, p in PRESETS.items()],
-                "tts": ["edge", "openai", "elevenlabs", "kokoro", "coqui", "system"],
-                "visuals": ["pexels", "pixabay", "local", "pollinations", "openai-images"]}
+                "tts": ["edge", "openai", "openrouter", "elevenlabs", "kokoro", "coqui", "system"],
+                "visuals": ["pexels", "pixabay", "local", "pollinations", "openai-images",
+                            "openrouter-images", "openrouter-video"]}
 
     def channel(self) -> dict:
         rows = [r for r in self.studio.history.recent(1000) if r.get("views") is not None]

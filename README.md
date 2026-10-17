@@ -253,6 +253,7 @@ python -m purffle_shorts demo
 python -m purffle_shorts demo --style chat        # text-message story
 python -m purffle_shorts demo --style dialogue    # two voices
 python -m purffle_shorts demo --style reddit      # Reddit-style story with a post card
+python -m purffle_shorts demo --style product     # product showcase with top product badges
 ```
 
 Or open the web app and click through it (demo mode is on until you add a key):
@@ -300,11 +301,13 @@ Pick one with `SCRIPT_STYLE` / `--style`, or leave it on `auto`.
 | `dialogue` | Two people talking: A asks or doubts, B answers with specifics. Each line is voiced with its own voice (`TTS_VOICE` and `TTS_VOICE_B`, or automatic), captions carry the speaker's name and colour |
 | `chat` | A text-message story: messages pop into a phone screen as they are read aloud, the contact's replies get a typing indicator, the chat scrolls when it fills up. Each side has its own voice |
 | `reddit` | A first-person story told like a Reddit post: a post card (community, poster, title, votes) is shown while the title is read, then the story plays with word captions. Written by the AI as fiction, or adapted from a post you link with `--url` |
+| `product` | A viral product showcase ("must-have finds / achadinhos" or single-product deep-dive): a persistent product badge pill appears at the top of each product scene while captions sit in the lower third so the center of the frame stays clear for product demos. Passing a product page to `--url` extracts product details and images automatically |
 
 ```bash
 purffle-shorts make --style chat --topic "a babysitter gets texts from an unknown number"
 purffle-shorts make --style dialogue --topic "why the sky is blue"
 purffle-shorts make --style reddit --topic "a neighbour who keeps borrowing my ladder"
+purffle-shorts make --style product --topic "3 genius kitchen gadgets that solve annoying problems"
 purffle-shorts make --url "https://www.reddit.com/r/tifu/comments/…"   # a real post as the source
 ```
 
@@ -349,6 +352,19 @@ YOUTUBE_API_KEY=...        # optional: reads public stats without asking for mor
 
 Set `LLM_PROVIDER` and `LLM_MODEL` in `.env`, or pass `--provider` / `--model`. With `LLM_PROVIDER=auto` the first key found is used, and a running Ollama is used when there is no key. `LLM_FALLBACKS=anthropic,gemini` retries with other providers when the main one fails. Any model a provider offers works; the defaults are only starting points.
 
+Choose separate text models with `LLM_MODEL_PLANNER`, `LLM_MODEL_SCRIPT`, `LLM_MODEL_REVIEW`, `LLM_MODEL_TRANSLATION` and `LLM_MODEL_CLIP`. Leave any value blank to use `LLM_MODEL` for that stage. Example for OpenRouter:
+
+```env
+LLM_PROVIDER=openrouter
+LLM_MODEL_PLANNER=openai/gpt-6-luna
+LLM_MODEL_SCRIPT=google/gemini-3.8-flash
+LLM_MODEL_REVIEW=openai/gpt-6-luna
+LLM_MODEL_TRANSLATION=google/gemini-3.8-flash
+LLM_MODEL_CLIP=openai/gpt-6-luna
+```
+
+The Studio's **AI & publishing → Choose a model for each stage** fields can override these per video. The Ideas page uses the planner selection, and the Clip page has its own clip selection and optional OpenRouter transcription model.
+
 | Provider | `LLM_PROVIDER` | Key | Default model |
 |---|---|---|---|
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` (GPT-5 / o-series supported) |
@@ -378,6 +394,7 @@ Set `LLM_PROVIDER` and `LLM_MODEL` in `.env`, or pass `--provider` / `--model`. 
 |---|---|---|---|
 | Microsoft neural voices (edge-tts) | `edge` *(default)* | Free, no key | Native |
 | OpenAI `gpt-4o-mini-tts` / `tts-1-hd` | `openai` | Paid | Aligned or estimated |
+| OpenRouter TTS models (default `google/gemini-3.8-flash-tts`) | `openrouter` | Paid, `OPENROUTER_API_KEY` | Aligned or estimated |
 | ElevenLabs | `elevenlabs` | Paid | Native |
 | Kokoro-82M (open weights, local) | `kokoro` | Free, `pip install kokoro soundfile` | Aligned or estimated |
 | Coqui TTS (local) | `coqui` | Free, `pip install coqui-tts` | Aligned or estimated |
@@ -406,7 +423,9 @@ Set `LLM_PROVIDER` and `LLM_MODEL` in `.env`, or pass `--provider` / `--model`. 
 
 The caption font is downloaded once from Google Fonts (Anton for Latin scripts, Noto Sans for other scripts). Set `CAPTION_FONT=/path/font.ttf` to use your own.
 
-**Visual sources** (`VISUAL_SOURCES`, tried in order per scene): `pexels`, `pixabay`, `local` (your `media/` folder, matched by filename keywords), `openai-images` (gpt-image-1 / DALL·E 3), `pollinations` (AI images). Searches and AI images follow the output shape (portrait, landscape or square).
+**Visual sources** (`VISUAL_SOURCES`, tried in order per scene): `pexels`, `pixabay`, `local` (your `media/` folder, matched by filename keywords), `openai-images` (gpt-image-1 / DALL·E 3), `openrouter-images` (model set with `OPENROUTER_IMAGE_MODEL`), `openrouter-video` (model set with `OPENROUTER_VIDEO_MODEL`), and `pollinations` (AI images). OpenRouter sources use `OPENROUTER_API_KEY`; video generation is asynchronous and can add significant cost and render time. Set a source explicitly to enable it. Searches and AI images follow the output shape (portrait, landscape or square).
+
+For clip transcription, set `CLIP_TRANSCRIPTION_MODEL` to an OpenRouter speech-to-text model that returns word-level timestamps, for example `elevenlabs/scribe-v2`. Leave it blank to keep the existing local faster-whisper / OpenAI path.
 
 > **Pollinations without a key is no longer practical for whole videos.** Tested on 29 September 2026: the first request returned an image, the next ones answered HTTP 402 "payment required", roughly one image every few minutes. When that happens PurffleShorts stops asking for the rest of that video and those scenes fall back to the next source. `POLLINATIONS_API_KEY` is sent as a Bearer token for keyed access; that path has not been tested here. Pexels and Pixabay keys are free and are the dependable choice.
 
@@ -554,10 +573,10 @@ It uses the official YouTube Data API with your own Google sign-in, and sets You
 
 | Component | Technology |
 |---|---|
-| Script | Any LLM: OpenAI-compatible HTTP, plus the Anthropic SDK with structured outputs; a review pass and translation on the same providers |
-| Voice | edge-tts, OpenAI, ElevenLabs, Kokoro, Coqui, OS voices; multi-speaker joining; optional faster-whisper alignment |
-| Video | ffmpeg (xfade, zoompan, sidechaincompress, loudnorm, libass), Pillow caption, chat and post-card renderers |
-| Media | Pexels, Pixabay, local files, OpenAI Images, Pollinations; yt-dlp for clipping from URLs |
+| Script | Any LLM: OpenAI-compatible HTTP, plus the Anthropic SDK with structured outputs; per-stage models, review and translation |
+| Voice | edge-tts, OpenAI, OpenRouter, ElevenLabs, Kokoro, Coqui, OS voices; multi-speaker joining; optional faster-whisper alignment |
+| Video | ffmpeg (xfade, zoompan, sidechaincompress, loudnorm, libass), Pillow caption, chat and post-card renderers; optional OpenRouter video generation |
+| Media | Pexels, Pixabay, local files, OpenAI Images, OpenRouter Images, Pollinations; yt-dlp for clipping from URLs |
 | Upload | YouTube Data API v3, OAuth 2.0, resumable uploads, view statistics |
 | Studio | Python standard-library HTTP server, vanilla JS/CSS, no build step |
 | Agents | MCP over stdio (standard library, no SDK) |

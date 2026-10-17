@@ -43,11 +43,15 @@ STYLES = {
     "reddit": "A first-person story told like a viral Reddit post (a confession, an 'am I wrong?' or a 'today I "
               "messed up'). Scene 1 is the post's title, read aloud; the rest is the story in casual first "
               "person, building to a twist or an update at the end.",
+    "product": "Product showcase: present 3-5 viral, useful products ('achadinhos' / top finds) — or one product "
+               "in depth when the subject is a single item — showing the problem each solves, how it works in "
+               "action, and why people want it.",
 }
 MULTI_SPEAKER = {"dialogue", "chat"}
 CARD_STYLES = {"reddit"}                  # single narrator, but the cast names the community and the poster
 AUTO_STYLES = ["facts", "facts", "story", "story", "listicle", "myth", "quiz", "explainer"]
 DEFAULT_CAST = {"dialogue": ["Alex", "Sam"], "chat": ["Unknown", "Me"], "reddit": ["r/stories", "u/throwaway"]}
+STYLE_ALIASES = {"products": "product", "showcase": "product", "achadinhos": "product"}
 
 # YouTube video category ids
 CATEGORIES = {
@@ -63,6 +67,7 @@ SCENE_SCHEMA = {
         "narration": {"type": "string"},
         "search_query": {"type": "string"},
         "image_prompt": {"type": "string"},
+        "product": {"type": "string"},
     },
     "required": ["speaker", "narration", "search_query", "image_prompt"],
     "additionalProperties": False,
@@ -111,6 +116,7 @@ class Scene:
     search_query: str
     image_prompt: str = ""
     speaker: str = "A"
+    product: str = ""
 
 
 @dataclass
@@ -158,8 +164,9 @@ class Script:
 
 
 def pick_style(settings: Settings, source: str) -> str:
-    if settings.style in STYLES:
-        return settings.style
+    st = STYLE_ALIASES.get(settings.style, settings.style)
+    if st in STYLES:
+        return st
     if source == "trending":
         return "news"
     if source in ("wikipedia", "reddit", "rss"):
@@ -174,7 +181,7 @@ def scene_plan(style: str, target_seconds: int) -> tuple[int, int]:
         return words, max(6, min(18, round(target_seconds / 2.8)))
     if style == "dialogue":
         return words, max(6, min(14, round(target_seconds / 3.5)))
-    if style == "reddit":
+    if style in ("reddit", "product"):
         return words, max(5, min(12, round(target_seconds / 4.5)))
     return words, max(4, min(10, round(target_seconds / 5.5)))
 
@@ -196,6 +203,20 @@ def _format_rules(style: str) -> str:
                 "- cast: [a fitting community name starting with r/ (e.g. r/confessions, r/pettyrevenge), "
                 "a made-up username starting with u/]. hook_text is not shown for this format.\n"
                 "- Fiction written like a real post: invent every person, never name real people. No emojis.\n")
+    if style == "product":
+        return ("- speaker is always \"A\" (one energetic presenter).\n"
+                "- If the subject is a category or list (e.g. kitchen gadgets, Shopee/Amazon finds, desk upgrades), "
+                "showcase 3-5 distinct useful products: open with a scroll-stopping hook, then give each product "
+                "1-2 scenes showing the problem it solves, how it works in action, and its best benefit. "
+                "If the subject is ONE specific product (or from a product page), dedicate all scenes to that "
+                "single product: hook with the problem it solves, demonstrate its best features step by step, "
+                "and end with why it is worth it.\n"
+                "- Set each scene's \"product\" field to the short on-screen product badge in the video's language "
+                "(max 5 words, e.g. \"1. Waterproof Outlet Cover\", \"2. Thermal Hair Brush\", or the product name "
+                "for a single-product spotlight; use \"\" on a pure intro or outro scene with no product shown).\n"
+                "- cast: list of the featured product names (1 to 5 items).\n"
+                "- search_query and image_prompt must describe close-up product demonstration or hands-on use.\n"
+                "- End with a short call to action asking which one the viewer would buy or pointing to the link.\n")
     return "- speaker is always \"A\" (one narrator). cast: [\"Narrator\"].\n"
 
 
@@ -212,6 +233,8 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
         avoid_block = "Do NOT repeat any of these recent videos:\n" + "\n".join(f"- {a}" for a in avoid[:40]) + "\n\n"
     ctx = f"Background information (use it, don't invent beyond it):\n{context.strip()}\n\n" if context else ""
     ins = f"{insights.strip()}\n\n" if insights else ""
+    scene_fields = "{speaker, narration, search_query, image_prompt, product}" if style == "product" \
+        else "{speaker, narration, search_query, image_prompt}"
     user = f"""Write one YouTube Short.
 
 Subject: {subject}
@@ -234,7 +257,7 @@ Language: {lang} for narration, title, hook_text, cast and description. search_q
 - hashtags: 3-5 relevant hashtags. tags: 8-15 search keywords.
 - category: one of {", ".join(CATEGORIES)}.
 
-Return JSON with keys: topic, title, hook_text, cast, scenes (array of {{speaker, narration, search_query, image_prompt}}), description, hashtags, tags, category."""
+Return JSON with keys: topic, title, hook_text, cast, scenes (array of {scene_fields}), description, hashtags, tags, category."""
     return system, user
 
 
@@ -259,6 +282,7 @@ def _handle(name: str, prefix: str) -> str:
 
 
 def normalize(data: dict, subject: str, style: str, language: str) -> Script:
+    style = STYLE_ALIASES.get(style, style)
     multi = style in MULTI_SPEAKER
     raw_scenes = data.get("scenes") or []
     scenes: list[Scene] = []
@@ -269,19 +293,27 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
         if not narration:
             continue
         query = _clean_tag(s.get("search_query") or "") or subject
+        product = truncate_words(_clean_tag(s.get("product") or ""), 36) if style == "product" else ""
         scenes.append(Scene(narration=narration, search_query=truncate_words(query, 60),
                             image_prompt=str(s.get("image_prompt") or query).strip(),
-                            speaker=_speaker(s.get("speaker")) if multi else "A"))
+                            speaker=_speaker(s.get("speaker")) if multi else "A",
+                            product=product))
     if not scenes:
         raise ValueError("script has no narration")
     limit = 20 if style == "chat" else 12
     while len(scenes) > limit:  # merge the shortest same-speaker neighbours to keep cuts watchable
-        pairs = [k for k in range(len(scenes) - 1) if scenes[k].speaker == scenes[k + 1].speaker]
+        pairs = [k for k in range(len(scenes) - 1)
+                 if scenes[k].speaker == scenes[k + 1].speaker
+                 and (style != "product" or scenes[k].product == scenes[k + 1].product)]
+        if not pairs:
+            pairs = [k for k in range(len(scenes) - 1) if scenes[k].speaker == scenes[k + 1].speaker]
         if not pairs:
             break
         i = min(pairs, key=lambda k: len(scenes[k].narration) + len(scenes[k + 1].narration))
         a, b = scenes[i], scenes.pop(i + 1)
         a.narration = f"{a.narration} {b.narration}"
+        if not a.product and b.product:
+            a.product = b.product
 
     title = re.sub(r"#\w+", "", strip_emoji(str(data.get("title") or subject)))
     title = re.sub(r"[<>\"“”]", "", title).strip(" '-:")
@@ -307,17 +339,34 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
             tags.append(t)
             total += cost
 
-    category = str(data.get("category") or "education").lower()
+    category = str(data.get("category") or ("howto" if style == "product" else "education")).lower()
     if category not in CATEGORIES:
-        category = "education"
+        category = "howto" if style == "product" else "education"
 
-    cast = [truncate_words(re.sub(r"[<>\"{}\[\]]", "", strip_emoji(str(c))).strip(), 24)
+    cast_max = 36 if style == "product" else 24
+    cast = [truncate_words(re.sub(r"[<>\"{}\[\]]", "", strip_emoji(str(c))).strip(), cast_max)
             for c in (data.get("cast") or []) if str(c).strip()]
     if multi or style in CARD_STYLES:
         defaults = DEFAULT_CAST[style]
         cast = (cast + defaults[len(cast):])[:2] if len(cast) < 2 else cast[:2]
         if style == "reddit":
             cast = [_handle(cast[0], "r/"), _handle(cast[1], "u/")]
+    elif style == "product":
+        cast = [c for c in cast if c.lower() != "narrator"][:6]
+        if any(sc.product for sc in scenes):
+            if not cast:
+                cast = list(dict.fromkeys(sc.product for sc in scenes if sc.product))[:6]
+        else:
+            if not cast:
+                cast = [truncate_words(_clean_tag(subject), 36) or "Featured Product"]
+            if len(cast) == 1:
+                for sc in scenes:
+                    sc.product = cast[0]
+            else:
+                start_i = 1 if len(scenes) > len(cast) else 0
+                span = max(1, len(scenes) - start_i)
+                for idx_s in range(start_i, len(scenes)):
+                    scenes[idx_s].product = cast[min(len(cast) - 1, (idx_s - start_i) * len(cast) // span)]
     else:
         cast = []
 
@@ -349,6 +398,7 @@ def word_count(text: str, language: str = "en") -> int:
 def write_script(llm, subject: str, settings: Settings, *, source: str = "niche",
                  avoid: list[str] | None = None, context: str = "", style: str | None = None,
                  insights: str = "") -> Script:
+    style = STYLE_ALIASES.get(style or "", style)
     style = style if style in STYLES else pick_style(settings, source)
     if llm is None:
         return offline_script(subject, settings, style)
@@ -437,7 +487,7 @@ def translate_script(llm, script: Script, language: str) -> Script:
 {json.dumps(src, ensure_ascii=False, indent=1)}
 
 Rules:
-- Translate title, hook_text, cast, description and every scene's narration into natural spoken {lang},
+- Translate title, hook_text, cast, description and every scene's narration (and product badge, if any) into natural spoken {lang},
   the way a native creator would say it (not word for word). Keep numbers and names accurate.
 - Keep EXACTLY {len(script.scenes)} scenes in the same order, with the same speaker for each.
 - Keep search_query and image_prompt unchanged (English).
@@ -449,6 +499,10 @@ Return the same JSON structure."""
         raise ValueError(f"translation to {language} has {len(out.scenes)} scenes, expected {len(script.scenes)}")
     for mine, theirs in zip(out.scenes, script.scenes):
         mine.search_query, mine.image_prompt, mine.speaker = theirs.search_query, theirs.image_prompt, theirs.speaker
+        if not theirs.product:
+            mine.product = ""
+        elif not mine.product:
+            mine.product = theirs.product
     out.category = script.category
     if script.style in CARD_STYLES:
         out.cast = list(script.cast)  # r/community and u/name are handles, not words to translate
@@ -466,10 +520,14 @@ def load_script(path: str | Path, settings: Settings) -> Script:
 
 def script_from_data(data: dict, settings: Settings, fallback_subject: str = "my video") -> Script:
     subject = str(data.get("topic") or data.get("title") or fallback_subject)
-    style = data.get("style") if data.get("style") in STYLES else "facts"
+    raw_style = STYLE_ALIASES.get(str(data.get("style") or "").lower(), data.get("style"))
+    style = raw_style if raw_style in STYLES else "facts"
     if style not in MULTI_SPEAKER and any(_speaker(s.get("speaker")) == "B" for s in data.get("scenes") or []
                                           if isinstance(s, dict)):
         style = "dialogue"
+    if style == "facts" and any(isinstance(s, dict) and str(s.get("product") or "").strip()
+                                for s in data.get("scenes") or []):
+        style = "product"
     language = str(data.get("language") or settings.language)
     return normalize(data, subject, style, language)
 
@@ -531,9 +589,28 @@ _DEMO_CHAT = [
     ("B", "ok follow for part 2", "ocean waves"),
 ]
 
+_DEMO_PRODUCT = [
+    ("", "Three viral everyday gadgets you didn't know you needed until right now.", "unboxing packages table"),
+    ("1. Waterproof Outlet Cover",
+     "First, this waterproof outlet cover sticks right to the bathroom wall and keeps plugs bone dry near the sink.",
+     "bathroom wall outlet"),
+    ("2. Thermal Hair Brush",
+     "Second, this thermal straightening brush detangles and smooths frizzy hair in one pass without burning your scalp.",
+     "woman brushing hair mirror"),
+    ("2. Thermal Hair Brush",
+     "It heats up in thirty seconds and leaves a salon finish in half the time.",
+     "hair styling tool closeup"),
+    ("3. Portable Mini Blender",
+     "And third, this rechargeable mini blender crushes fruit and ice anywhere, then rinses clean with water and a drop of soap.",
+     "portable blender smoothie kitchen"),
+    ("", "Which one of these would you actually use? Comment the number and follow for more finds.",
+     "online shopping phone"),
+]
+
 
 def offline_script(subject: str, settings: Settings, style: str = "facts") -> Script:
     s = (subject or "").strip()
+    style = STYLE_ALIASES.get(style, style)
     if style in MULTI_SPEAKER:
         lines = _DEMO_DIALOGUE if style == "dialogue" else _DEMO_CHAT
         data = dict(_DEMO, topic="octopus superpowers", cast=DEFAULT_CAST[style] if style == "dialogue"
@@ -554,6 +631,17 @@ def offline_script(subject: str, settings: Settings, style: str = "facts") -> Sc
                     category="entertainment",
                     scenes=[{"narration": n, "search_query": q, "image_prompt": q} for n, q in _DEMO_REDDIT])
         return normalize(data, "a cat with three families", "reddit", "en")
+    if style == "product":
+        data = dict(_DEMO, topic="3 viral everyday gadgets", title="3 Viral Finds You Didn't Know You Needed",
+                    hook_text="3 VIRAL FINDS YOU NEED",
+                    cast=["1. Waterproof Outlet Cover", "2. Thermal Hair Brush", "3. Portable Mini Blender"],
+                    description="Three viral everyday gadgets that solve annoying daily problems. Which one would you buy?",
+                    hashtags=["#gadgets", "#usefulproducts", "#onlinefinds", "#techfinds"],
+                    tags=["viral gadgets", "useful products", "home gadgets", "product showcase", "kitchen gadgets"],
+                    category="howto",
+                    scenes=[{"product": p, "narration": n, "search_query": q, "image_prompt": q}
+                            for p, n, q in _DEMO_PRODUCT])
+        return normalize(data, "3 viral everyday gadgets", "product", "en")
     if not s or "octopus" in s.lower() or s.lower() in {"demo", "random"}:
         d = _DEMO
         data = dict(d, topic="octopus superpowers",

@@ -21,7 +21,7 @@ from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
 from .media import MediaItem, Visuals
-from .overlays import ChatMessage, build_overlays
+from .overlays import ChatMessage, ProductBadge, build_overlays
 from .render import extract_frame, render_video
 from .script import (
     CARD_STYLES,
@@ -40,7 +40,8 @@ from .utils import redact, slugify, truncate_words
 log = logging.getLogger("purffle")
 
 END_PAD = 0.6          # seconds of breathing room after the last word
-REUSABLE_SOURCES = {"generated", "local", "openai-images", "ai", "dalle", "gpt-image", "pollinations"}
+REUSABLE_SOURCES = {"generated", "local", "product-page", "openai-images", "openrouter-images", "openrouter-video",
+                    "ai", "dalle", "gpt-image", "pollinations"}
 
 # Rough share of the work done when each stage starts (for progress bars).
 STAGES = {"topic": 2, "script": 8, "review": 20, "voice": 32, "footage": 45, "captions": 62, "render": 72,
@@ -116,11 +117,29 @@ def _media_for(timeline, media_map: dict[int, MediaItem]) -> list[MediaItem]:
     return out
 
 
+def _product_badges(script: Script, timeline) -> list[ProductBadge]:
+    """Map product scene labels onto the rendered segment timeline, merging consecutive shots of the same item."""
+    out: list[ProductBadge] = []
+    n = len(script.scenes)
+    for i, st in enumerate(timeline):
+        nxt = timeline[i + 1].index if i + 1 < len(timeline) else n
+        label = next((script.scenes[k].product.strip() for k in range(st.index, max(st.index + 1, nxt))
+                      if k < n and script.scenes[k].product.strip()), "")
+        if not label:
+            continue
+        if out and out[-1].label == label and abs(out[-1].end - st.start) < 0.05:
+            out[-1].end = st.end
+        else:
+            out.append(ProductBadge(label, st.start, st.end))
+    return out
+
+
 class Studio:
     def __init__(self, settings: Settings, progress: ProgressFn | None = None):
         self.s = settings
         self.history = History(settings.data_path / "history.db")
         self._llm: LLM | None = None
+        self._stage_llms: dict[str, LLM] = {}
         self.progress = progress
         self._stats_synced = 0.0
         self._refused_on = ""  # the quota day on which YouTube itself refused an upload
@@ -142,6 +161,21 @@ class Studio:
                      f" (fallbacks: {', '.join(str(p) for p in self._llm.providers[1:])})"
                      if len(self._llm.providers) > 1 else "")
         return self._llm
+
+    def llm_for_stage(self, stage: str) -> LLM | None:
+        """Use a stage-specific model when set; otherwise preserve the shared LLM_MODEL."""
+        if self.s.offline:
+            return None
+        model = getattr(self.s, f"llm_model_{stage}", "")
+        if not model or model == self.s.llm_model:
+            return self.llm
+        if model not in self._stage_llms:
+            llm = LLM(replace(self.s, llm_model=model))
+            self._stage_llms[model] = llm
+            log.info("LLM for %s: %s%s", stage, llm.label,
+                     f" (fallbacks: {', '.join(str(p) for p in llm.providers[1:])})"
+                     if len(llm.providers) > 1 else "")
+        return self._stage_llms[model]
 
     # ------------------------------------------------------------------ voice with fallbacks
     def _speak(self, script: Script, work: Path, s: Settings) -> tts.Speech:
@@ -182,16 +216,17 @@ class Studio:
         try:
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
-            script = write_script(self.llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
+            writer_llm = self.llm_for_stage("script")
+            script = write_script(writer_llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
                                   context=pick.context, style=style or pick.style or None, insights=insights)
-            if self.llm is not None and s.script_review != "off":
+            if writer_llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
-                script = review_script(self.llm, script, s)
+                script = review_script(self.llm_for_stage("review"), script, s)
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
             raise
-        return script, pick, self.llm.label if self.llm else "offline"
+        return script, pick, writer_llm.label if writer_llm else "offline"
 
     # ------------------------------------------------------------------ one video
     def make(self, topic: str | None = None, *, source: str | None = None, upload: bool | None = None,
@@ -257,7 +292,7 @@ class Studio:
             else:
                 jobs = [(script.scenes[st.index].search_query, script.scenes[st.index].image_prompt,
                          st.duration + T) for st in timeline]
-                visuals = Visuals(s, self.history.used_media())
+                visuals = Visuals(s, self.history.used_media(), extra_images=pick.images)
                 media = visuals.for_scenes(jobs, script.topic, work / "media")
                 credits = visuals.credits
             by_scene = {st.index: m for st, m in zip(timeline, media)}
@@ -277,8 +312,14 @@ class Studio:
                     community, user = (script.cast + DEFAULT_CAST["reddit"][len(script.cast):])[:2]
                     card = (community, user, script.scenes[0].narration)
                     on_screen = caption_chunks(speech.words[n0:], s.caption_max_words, total=total)
-            plan = build_overlays(s, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
-                                  contact=script.speaker_name("A"), card=card, card_until=card_until)
+            badges = None
+            overlay_s = s
+            if script.style == "product":
+                badges = _product_badges(script, timeline) or None
+                if s.caption_position == "center":
+                    overlay_s = replace(s, caption_position="lower")
+            plan = build_overlays(overlay_s, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
+                                  contact=script.speaker_name("A"), card=card, card_until=card_until, badges=badges)
 
             self._step("render", f"{s.width}x{s.height}")
             video = folder / ("short.mp4" if s.vertical else "video.mp4")
@@ -343,9 +384,10 @@ class Studio:
                      by_scene: dict[int, MediaItem], credits: set[str], parent_id: int, upload: bool) -> Result:
         t0 = time.time()
         try:
-            if self.llm is None:
+            translation_llm = self.llm_for_stage("translation")
+            if translation_llm is None:
                 raise RuntimeError("translations need an LLM (not available in demo mode)")
-            translated = translate_script(self.llm, script, lang)
+            translated = translate_script(translation_llm, script, lang)
             translated.score, translated.review = script.score, script.review
             log.info("Translated to %s: %s", lang, translated.title)
             return self.produce(translated, pick, writer, upload=upload, t0=t0, media_map=by_scene, credits=credits,
@@ -445,7 +487,7 @@ class Studio:
         upload = s.upload if upload is None else upload
         produced, batch, empty_batches = 0, 0, 0
         mode = "upload" if upload else "no-upload"
-        _ = self.llm  # fail fast on LLM configuration problems
+        _ = self.llm_for_stage("script")  # fail fast on LLM configuration problems
         log.info("Autopilot started (%s, batch %d, workers %d%s)", mode, s.batch_size, s.workers,
                  f", target {count}" if count else "")
         try:
