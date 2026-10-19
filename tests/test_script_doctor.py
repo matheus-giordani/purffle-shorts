@@ -164,7 +164,7 @@ def test_offline_reddit_story():
     assert s.scenes[0].narration.startswith("Am I wrong") and len(s.scenes) == 8
 
 
-def test_product_showcase_normalizes_badges_and_cast():
+def test_product_showcase_normalizes_scene_product_names_and_cast():
     scenes = [
         {"speaker": "A", "product": "", "narration": "Three home finds that fix daily annoyances.", "search_query": "q0", "image_prompt": "p0"},
         {"speaker": "A", "product": "1. Waterproof Outlet Cover", "narration": "Keep water splashes off bathroom outlets.", "search_query": "q1", "image_prompt": "p1"},
@@ -177,7 +177,7 @@ def test_product_showcase_normalizes_badges_and_cast():
     assert [sc.product for sc in s.scenes] == ["", "1. Waterproof Outlet Cover", "1. Waterproof Outlet Cover", "2. Magnetic Cable Clip"]
 
 
-def test_product_showcase_fills_missing_scene_badges_from_cast():
+def test_product_showcase_fills_missing_scene_product_names_from_cast():
     s = normalize({"title": "T", "cast": ["1. Pill Bottle", "2. Cord Holder"], "scenes": _scenes(5)}, "x", "product", "en")
     assert s.cast == ["1. Pill Bottle", "2. Cord Holder"]
     assert s.scenes[0].product == ""
@@ -194,7 +194,7 @@ def test_script_from_data_detects_product_format_and_aliases():
     assert s2.style == "product"
 
 
-def test_product_translation_translates_product_badges():
+def test_product_translation_translates_scene_product_names():
     scenes = _scenes(3)
     scenes[1]["product"] = "1. Waterproof Outlet Cover"
     scenes[2]["product"] = "2. Magnetic Cable Clip"

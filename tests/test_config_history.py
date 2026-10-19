@@ -19,8 +19,12 @@ def test_parse_resolution_fallback():
     assert parse_resolution("garbage") == (1080, 1920)
 
 
-def test_watermark_defaults_to_channel():
-    assert Settings(channel_name="Chan").watermark_text == "Chan"
+def test_watermark_is_opt_in(monkeypatch):
+    monkeypatch.setenv("CHANNEL_NAME", "PurffleStudios")
+    monkeypatch.delenv("WATERMARK", raising=False)
+    assert Settings(channel_name="Chan").watermark_text == ""
+    assert Settings.from_env().watermark_text == ""
+    assert Settings(channel_name="Chan", watermark="MyBrand").watermark_text == "MyBrand"
     assert Settings(watermark="none").watermark_text == ""
 
 

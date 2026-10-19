@@ -90,7 +90,7 @@ It is made for **content creators**, **faceless YouTube channels**, **educators*
 - Captions appear exactly when each word is spoken, with the current word highlighted. 6 styles; Latin, Indic, Arabic, Thai and CJK scripts.
 - Dialogues get speaker name tags and a colour per speaker; chat stories get an animated phone screen with typing indicators; Reddit-style stories open on a post card (community, poster, title, votes).
 - **9:16, 16:9, 1:1 or 4:5** output (`--aspect`), with captions and overlays sized for each shape.
-- Hook title, watermark, progress bar, end call-to-action, background music that ducks under the voice, loudness normalised to −14 LUFS.
+- Hook title, optional custom watermark, progress bar, end call-to-action, background music that ducks under the voice, loudness normalised to −14 LUFS.
 - Plain ffmpeg: each scene is prepared as a short segment, then one final encode joins them and adds everything above. No MoviePy, no ImageMagick, no GPU.
 
 **Publishing**
@@ -233,7 +233,7 @@ flowchart LR
 | 4. **Voice** | Neural TTS speaks the script and returns per-word timestamps (or they are aligned/estimated). Dialogues and chats are voiced line by line with two voices |
 | 5. **Footage** | Each scene gets its own clip: Pexels / Pixabay video (portrait preferred), photos with Ken Burns motion, your own `media/` folder, or AI images, with an animated gradient as the last resort |
 | 6. **Captions** | 2–3-word captions appear exactly when spoken, with the current word highlighted; chat stories show messages popping in on a phone screen instead, and Reddit-style stories open on a post card |
-| 7. **Render** | Scenes are cover-cropped to the output shape, colour-graded and joined with transitions; hook title, watermark, progress bar, end CTA, ducked music and −14 LUFS loudness are added in one final ffmpeg encode |
+| 7. **Render** | Scenes are cover-cropped to the output shape, colour-graded and joined with transitions; hook title, optional custom watermark, progress bar, end CTA, ducked music and −14 LUFS loudness are added in one final ffmpeg encode |
 | 8. **Publish** | Uploaded now, or scheduled into your next free time slot, with the synthetic-media disclosure set; queued automatically when the daily quota is used up |
 
 ---
@@ -264,7 +264,7 @@ python -m purffle_shorts demo
 python -m purffle_shorts demo --style chat        # text-message story
 python -m purffle_shorts demo --style dialogue    # two voices
 python -m purffle_shorts demo --style reddit      # Reddit-style story with a post card
-python -m purffle_shorts demo --style product     # product showcase with top product badges
+python -m purffle_shorts demo --style product     # product demonstrations and comparisons
 ```
 
 Or open the web app and click through it (demo mode is on until you add a key):
@@ -312,7 +312,7 @@ Pick one with `SCRIPT_STYLE` / `--style`, or leave it on `auto`.
 | `dialogue` | Two people talking: A asks or doubts, B answers with specifics. Each line is voiced with its own voice (`TTS_VOICE` and `TTS_VOICE_B`, or automatic), captions carry the speaker's name and colour |
 | `chat` | A text-message story: messages pop into a phone screen as they are read aloud, the contact's replies get a typing indicator, the chat scrolls when it fills up. Each side has its own voice |
 | `reddit` | A first-person story told like a Reddit post: a post card (community, poster, title, votes) is shown while the title is read, then the story plays with word captions. Written by the AI as fiction, or adapted from a post you link with `--url` |
-| `product` | A viral product showcase ("must-have finds / achadinhos" or single-product deep-dive): a persistent product badge pill appears at the top of each product scene while captions sit in the lower third so the center of the frame stays clear for product demos. Passing a product page to `--url` extracts product details and images automatically |
+| `product` | A product showcase ("must-have finds / achadinhos" or single-product deep-dive) with demonstrations, narration and captions. Passing a product page to `--url` extracts product details and images automatically |
 
 ```bash
 purffle-shorts make --style chat --topic "a babysitter gets texts from an unknown number"
@@ -427,7 +427,7 @@ The Studio's **AI & publishing → Choose a model for each stage** fields can ov
 | `CAPTION_POSITION` | `upper` · `center` · `lower` |
 | `COLOR_GRADE` | `none` · `vivid` · `cinematic` · `warm` · `cool` · `bw` |
 | `TRANSITION` | `random` · `none` · `fade` · `slideup` · `smoothleft` · `circleopen` · `zoomin` · … |
-| Overlays | Hook title (`HOOK_OVERLAY`), watermark (`WATERMARK`, defaults to `CHANNEL_NAME`, which is PurffleStudios until you change it; `none` hides it), progress bar (`PROGRESS_BAR`), end call-to-action (`END_CTA`) |
+| Overlays | Hook title (`HOOK_OVERLAY`), optional custom watermark (`WATERMARK`; blank or `none` disables it), progress bar (`PROGRESS_BAR`), end call-to-action (`END_CTA`) |
 | Music | Drop tracks in `music/` (a random one is picked per video; `back.mp3` still works); `MUSIC_VOLUME`, `MUSIC_DUCKING` |
 | Shape | `ASPECT=9:16` (Shorts, Reels, TikTok) · `16:9` (regular YouTube video, no `#shorts`) · `1:1` · `4:5`, or an exact `RESOLUTION=1080x1920` |
 | Output | `FPS=30`, `VIDEO_ENCODER=libx264` · `h264_videotoolbox` (Mac) · `h264_nvenc` (NVIDIA) · `auto` (a hardware encoder that fails falls back to libx264) |
@@ -544,7 +544,7 @@ Yes. It is MIT-licensed and runs on your own computer. The default voices, Ollam
 Yes: `--style chat` renders an animated phone screen with messages popping in as each side's voice reads them, `--style reddit` opens on a Reddit-style post card and then tells the story with captions, and `--style dialogue` voices two people with name tags on the captions.
 
 **Is there a free, open-source alternative to Opus Clip?**<br>
-`purffle-shorts clip` does the same job on your own computer: it transcribes a podcast, interview or stream, lets an LLM (a local Ollama model works) pick self-contained moments, and cuts captioned 9:16 clips. There are no per-minute credits, and the only watermark is your channel name from `CHANNEL_NAME` (it reads PurffleStudios until you set it; `WATERMARK=none` removes it). It crops to the centre (or fits the whole picture over a blurred copy); it does not track faces.
+`purffle-shorts clip` does the same job on your own computer: it transcribes a podcast, interview or stream, lets an LLM (a local Ollama model works) pick self-contained moments, and cuts captioned 9:16 clips. There are no per-minute credits or default watermark; set `WATERMARK=MyBrand` to add your own. It crops to the centre (or fits the whole picture over a blurred copy); it does not track faces.
 
 **How is it different from MoneyPrinterTurbo or ShortGPT?**<br>
 All three turn a topic into a Short. PurffleShorts adds a script review pass, text-message, dialogue and Reddit-style formats, long-video clipping, scheduled uploads through the official YouTube API, and an MCP server. See the [comparison table](#%EF%B8%8F-how-it-compares) for the details and where the others are ahead.
@@ -611,7 +611,7 @@ purffle-shorts/
 │   ├── tts.py               # voice engines, two-speaker joining, word alignment
 │   ├── timing.py            # word timing, scene timeline, caption chunks, SRT
 │   ├── media.py             # Pexels / Pixabay / local / AI images, de-duplication
-│   ├── overlays.py          # captions (Pillow + libass), chat screen, post card, hook, watermark, CTA, fonts
+│   ├── overlays.py          # captions (Pillow + libass), chat screen, post card, hook, optional watermark, CTA, fonts
 │   ├── render.py            # ffmpeg segments, transitions, grading, audio mix
 │   ├── youtube.py           # OAuth, upload, scheduling, quota
 │   ├── analytics.py         # view counts → what the LLM learns from

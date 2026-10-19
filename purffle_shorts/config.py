@@ -154,7 +154,7 @@ class Settings:
     ken_burns: bool = True
     progress_bar: bool = True
     hook_overlay: bool = True
-    watermark: str = ""               # blank = channel name; "none" = off
+    watermark: str = ""               # blank or "none" = off; set explicit text to add a custom watermark
     end_cta: str = "Follow for more!"
     caption_style: str = "bold"       # bold|boxed|neon|clean|karaoke|minimal
     caption_position: str = "center"  # upper|center|lower
@@ -235,9 +235,10 @@ class Settings:
 
     @property
     def watermark_text(self) -> str:
-        if self.watermark.lower() in {"none", "off", "false", "0"}:
+        value = self.watermark.strip()
+        if not value or value.lower() in {"none", "off", "false", "0"}:
             return ""
-        return self.watermark or self.channel_name
+        return value
 
     @property
     def out_path(self) -> Path:

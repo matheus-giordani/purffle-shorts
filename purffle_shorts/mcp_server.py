@@ -31,7 +31,7 @@ _STYLE = {"type": "string", "enum": ["auto", "facts", "story", "listicle", "myth
                                      "explainer", "dialogue", "chat", "reddit", "product"],
           "description": "Video format. dialogue = two voices talking; chat = animated text-message story; "
                          "reddit = first-person story that opens on a post card; "
-                         "product = product showcase with top product badges."}
+                         "product = product demonstrations and comparisons."}
 TOOLS: list[dict] = [
     {"name": "make_short",
      "description": "Write, voice and render a complete short video (script, voice, footage, captions, music) and "

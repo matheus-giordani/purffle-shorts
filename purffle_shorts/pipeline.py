@@ -21,7 +21,7 @@ from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
 from .media import MediaItem, Visuals
-from .overlays import ChatMessage, ProductBadge, build_overlays
+from .overlays import ChatMessage, build_overlays
 from .render import extract_frame, render_video
 from .script import (
     CARD_STYLES,
@@ -115,23 +115,6 @@ def _media_for(timeline, media_map: dict[int, MediaItem]) -> list[MediaItem]:
     for st in timeline:
         k = max([k for k in keys if k <= st.index], default=keys[0])
         out.append(media_map[k])
-    return out
-
-
-def _product_badges(script: Script, timeline) -> list[ProductBadge]:
-    """Map product scene labels onto the rendered segment timeline, merging consecutive shots of the same item."""
-    out: list[ProductBadge] = []
-    n = len(script.scenes)
-    for i, st in enumerate(timeline):
-        nxt = timeline[i + 1].index if i + 1 < len(timeline) else n
-        label = next((script.scenes[k].product.strip() for k in range(st.index, max(st.index + 1, nxt))
-                      if k < n and script.scenes[k].product.strip()), "")
-        if not label:
-            continue
-        if out and out[-1].label == label and abs(out[-1].end - st.start) < 0.05:
-            out[-1].end = st.end
-        else:
-            out.append(ProductBadge(label, st.start, st.end))
     return out
 
 
@@ -320,14 +303,12 @@ class Studio:
                     community, user = (script.cast + DEFAULT_CAST["reddit"][len(script.cast):])[:2]
                     card = (community, user, script.scenes[0].narration)
                     on_screen = caption_chunks(speech.words[n0:], s.caption_max_words, total=total)
-            badges = None
             overlay_s = s
             if script.style == "product":
-                badges = _product_badges(script, timeline) or None
                 if s.caption_position == "center":
                     overlay_s = replace(s, caption_position="lower")
             plan = build_overlays(overlay_s, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
-                                  contact=script.speaker_name("A"), card=card, card_until=card_until, badges=badges)
+                                  contact=script.speaker_name("A"), card=card, card_until=card_until)
 
             self._step("render", f"{s.width}x{s.height}")
             video = folder / ("short.mp4" if s.vertical else "video.mp4")

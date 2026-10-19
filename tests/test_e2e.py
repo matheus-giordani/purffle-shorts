@@ -46,3 +46,33 @@ def test_render_from_script_file_needs_no_llm(settings, tmp_path):
     meta = json.loads((r.folder / "metadata.json").read_text())
     assert meta["title"] == "Honey Never Spoils #shorts"
     assert meta["llm"] == "script file" and meta["source"] == "script"
+
+
+@needs_ffmpeg
+def test_legacy_product_script_renders_without_badge(settings, tmp_path):
+    f = tmp_path / "old-product-script.json"
+    f.write_text(json.dumps({
+        "topic": "Calendário Planeta Único",
+        "title": "Calendário Planeta Único",
+        "hook_text": "Organize seu ano",
+        "style": "product",
+        "language": "pt-BR",
+        "cast": ["Calendário Planeta Único"],
+        "category": "education",
+        "scenes": [
+            {"speaker": "A", "product": "Calendário Planeta Único",
+             "narration": "Um calendário anual reúne datas importantes em uma única página.",
+             "search_query": "annual calendar", "image_prompt": "calendar on a desk"},
+            {"speaker": "A", "product": "Calendário Planeta Único",
+             "narration": "Consulte feriados e planeje compromissos com mais facilidade.",
+             "search_query": "calendar planning", "image_prompt": "person planning dates"},
+        ],
+    }, ensure_ascii=False))
+    s = settings.with_overrides(offline=True, tts_engine="silent", resolution=(360, 640), fps=24, music_volume=0.0)
+    r = Studio(s).make(script_file=f)
+    assert r.ok, r.error
+    saved = json.loads((r.folder / "script.json").read_text())
+    assert saved["style"] == "product"
+    assert saved["scenes"][0]["product"] == "Calendário Planeta Único"
+    assert (r.folder / "captions.srt").read_text().strip()
+    assert ffmpeg.probe(r.video)["duration"] > 5

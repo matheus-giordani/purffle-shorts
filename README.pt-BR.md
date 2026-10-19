@@ -53,7 +53,7 @@ Ele também é um pequeno estúdio: edite qualquer linha do roteiro antes de ren
 | `dialogue` | Duas pessoas conversando, cada uma com a sua própria voz; as legendas mostram o nome e a cor de quem está falando |
 | `chat` | Uma história em mensagens de texto: as mensagens vão aparecendo na tela animada de um celular enquanto são lidas em voz alta, com indicador de digitação |
 | `reddit` | Uma história em primeira pessoa contada como um post do Reddit: um card do post enquanto o título é lido, e depois a história com legendas |
-| `product` | Apresentação de produtos ("achadinhos" de 3 a 5 itens ou review de um produto único): exibe um badge no topo com o nome de cada produto e posiciona as legendas no terço inferior para deixar o centro livre para a demonstração. Com `--url` em uma página de produto, extrai dados e fotos automaticamente |
+| `product` | Apresentação de produtos ("achadinhos" de 3 a 5 itens ou análise de um produto): cenas de demonstração, narração e legendas, sem etiqueta visual sobre o vídeo. Com `--url` em uma página de produto, extrai dados e fotos automaticamente |
 
 ```bash
 purffle-shorts make --style chat --topic "uma babá recebe mensagens de um número desconhecido"

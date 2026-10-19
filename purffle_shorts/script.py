@@ -212,9 +212,10 @@ def _format_rules(style: str) -> str:
                 "If the subject is ONE specific product (or from a product page), dedicate all scenes to that "
                 "single product: hook with the problem it solves, demonstrate its best features step by step, "
                 "and end with why it is worth it.\n"
-                "- Set each scene's \"product\" field to the short on-screen product badge in the video's language "
-                "(max 5 words, e.g. \"1. Waterproof Outlet Cover\", \"2. Thermal Hair Brush\", or the product name "
-                "for a single-product spotlight; use \"\" on a pure intro or outro scene with no product shown).\n"
+                "- Set each scene's \"product\" field to the short product name in the video's language for script "
+                "organization (max 5 words, e.g. \"Waterproof Outlet Cover\", \"Thermal Hair Brush\", or the product "
+                "name for a single-product spotlight; use \"\" on a pure intro or outro scene with no product shown). "
+                "This field is not displayed as an on-screen label.\n"
                 "- cast: list of the featured product names (1 to 5 items).\n"
                 "- search_query and image_prompt must describe close-up product demonstration or hands-on use.\n"
                 "- End with a short call to action asking which one the viewer would buy or pointing to the link.\n")
@@ -491,7 +492,7 @@ def translate_script(llm, script: Script, language: str) -> Script:
 {json.dumps(src, ensure_ascii=False, indent=1)}
 
 Rules:
-- Translate title, hook_text, cast, description and every scene's narration (and product badge, if any) into natural spoken {lang},
+- Translate title, hook_text, cast, description, every scene's narration and product name, if any, into natural spoken {lang},
   the way a native creator would say it (not word for word). Keep numbers and names accurate.
 - Keep EXACTLY {len(script.scenes)} scenes in the same order, with the same speaker for each.
 - Keep search_query and image_prompt unchanged (English).

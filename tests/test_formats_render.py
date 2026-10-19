@@ -24,8 +24,9 @@ def spy_overlays(monkeypatch):
     real = P.build_overlays
 
     def spy(*a, **kw):
-        calls.append(dict(kw, _chunks=a[1]))
-        return real(*a, **kw)
+        plan = real(*a, **kw)
+        calls.append(dict(kw, _chunks=a[1], _plan=plan))
+        return plan
     monkeypatch.setattr(P, "build_overlays", spy)
     return calls
 
@@ -78,34 +79,55 @@ def test_post_card_fits_every_shape(settings, tmp_path):
 
 
 @needs_ffmpeg
-def test_product_showcase_renders_top_badges_and_lower_captions(fast, spy_overlays):
+def test_product_showcase_renders_without_badges(fast, spy_overlays):
     r = P.Studio(fast).make(style="product")
     assert r.ok, r.error
     kw = spy_overlays[0]
-    badges = kw["badges"]
-    assert badges and len(badges) == 3
-    assert [b.label for b in badges] == [
-        "1. Waterproof Outlet Cover",
-        "2. Thermal Hair Brush",
-        "3. Portable Mini Blender",
-    ]
-    assert all(b.end > b.start >= 0 for b in badges)
-    assert all(b.start >= a.end - 0.01 for a, b in zip(badges, badges[1:]))
+    assert "badges" not in kw and not hasattr(kw["_plan"], "badges")
     meta = json.loads((r.folder / "metadata.json").read_text())
     assert meta["style"] == "product" and len(meta["cast"]) == 3
+    assert (r.folder / "captions.srt").read_text().strip()
     assert ffmpeg.probe(r.video)["duration"] > 15
 
 
-def test_product_badge_fits_every_shape(settings, tmp_path):
-    from PIL import Image
+@pytest.mark.parametrize("ass_renderer", [False, True])
+def test_watermark_is_opt_in_for_both_overlay_renderers(settings, monkeypatch, tmp_path, ass_renderer):
+    from purffle_shorts import overlays
 
-    from purffle_shorts.overlays import product_badge_png
-    long_label = "1. Ultra Compact Waterproof Bathroom Outlet Cover Box With Cord Slot"
-    for size in [(1080, 1920), (1920, 1080), (1080, 1080)]:
-        s = settings.with_overrides(resolution=size)
-        png, x, y = product_badge_png(s, None, long_label, tmp_path / f"badge_{size[0]}x{size[1]}.png")
-        w, h = Image.open(png).size
-        assert 0 <= x and x + w <= size[0] and 0 <= y and y + h <= size[1], (size, x, y, w, h)
+    monkeypatch.setattr(overlays, "resolve_font", lambda *_: (None, "Sans"))
+    monkeypatch.setattr(overlays, "needs_ass", lambda _: ass_renderer)
+    monkeypatch.setattr(overlays.ffmpeg, "has_filter", lambda name: name == "ass")
+    drawn = []
+
+    def fake_watermark(s, _font, text, dest):
+        drawn.append(text)
+        return dest, int(s.height * 0.045)
+
+    monkeypatch.setattr(overlays, "watermark_png", fake_watermark)
+
+    def render(value, name):
+        s = settings.with_overrides(channel_name="PurffleStudios", watermark=value, end_cta="", hook_overlay=False)
+        return overlays.build_overlays(s, [], 8, "", tmp_path / name)
+
+    default = render("", "default")
+    if ass_renderer:
+        assert "PurffleStudios" not in default.ass.read_text()
+    else:
+        assert default.watermark is None
+
+    custom = render("MyBrand", "custom")
+    if ass_renderer:
+        assert "MyBrand" in custom.ass.read_text()
+    else:
+        assert custom.watermark == (tmp_path / "custom" / "watermark.png", int(settings.height * 0.045))
+    assert drawn == ([] if ass_renderer else ["MyBrand"])
+
+    disabled = render("none", "disabled")
+    if ass_renderer:
+        text = disabled.ass.read_text()
+        assert "PurffleStudios" not in text and "MyBrand" not in text
+    else:
+        assert disabled.watermark is None
 
 
 
@@ -200,6 +222,15 @@ def _fake_transcript(total=40.0):
 @pytest.mark.parametrize("crop", ["center", "blur"])
 def test_clipper_cuts_captioned_vertical_clips(fast, monkeypatch, long_video, crop):
     monkeypatch.setattr(clipper, "transcribe", lambda video, work, settings: _fake_transcript())
+    real_overlays = clipper.build_overlays
+    overlay_plans = []
+
+    def spy_overlays(*args, **kwargs):
+        plan = real_overlays(*args, **kwargs)
+        overlay_plans.append(plan)
+        return plan
+
+    monkeypatch.setattr(clipper, "build_overlays", spy_overlays)
     studio = P.Studio(fast)
     results = clipper.make_clips(studio, str(long_video), count=2, crop=crop, upload=False,
                                  min_seconds=8, max_seconds=14)
@@ -212,6 +243,7 @@ def test_clipper_cuts_captioned_vertical_clips(fast, monkeypatch, long_video, cr
         assert (r.folder / "captions.srt").read_text().strip()
     assert results[1].video != results[0].video
     assert not list(fast.out_path.glob(".clip-*"))  # scratch copy cleaned up
+    assert all(plan.watermark is None for plan in overlay_plans)
 
 
 def test_clip_moments_snap_to_sentences_and_never_overlap():

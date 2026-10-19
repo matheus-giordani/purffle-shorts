@@ -42,7 +42,7 @@ const FORMATS = [
   ["dialogue", "Dialogue", "Two voices, back and forth", true],
   ["chat", "Text story", "Animated text messages", true],
   ["reddit", "Reddit story", "Post card, then the story", true],
-  ["product", "Product", "Showcase products with top badges", true],
+  ["product", "Product", "Product demos and comparisons", true],
 ];
 const MULTI = new Set(["dialogue", "chat"]);
 const STAGES = [["topic", "Topic"], ["script", "Script"], ["review", "Review"], ["voice", "Voice"], ["footage", "Footage"],
@@ -498,7 +498,7 @@ function drawEditor() {
           <textarea data-i="${n}" data-s="narration" aria-label="Scene ${n + 1} narration">${esc(s.narration)}</textarea>
           <div class="row">
             ${multi ? `<button class="btn ghost sm" type="button" data-act="speaker" data-i="${n}" title="Switch speaker">A/B</button>` : ""}
-            ${isProduct ? `<input type="text" data-i="${n}" data-s="product" value="${esc(s.product || "")}" placeholder="product badge (e.g. 1. Mini Blender)" aria-label="Product badge">` : ""}
+            ${isProduct ? `<input type="text" data-i="${n}" data-s="product" value="${esc(s.product || "")}" placeholder="product name (not shown on screen)" aria-label="Product name (not shown on screen)">` : ""}
             <input type="text" data-i="${n}" data-s="search_query" value="${esc(s.search_query)}" placeholder="footage search" aria-label="Footage search">
             <span class="tools">
               <button class="btn ghost sm" type="button" data-act="up" data-i="${n}" aria-label="Move up">${I.up}</button>
