@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import analytics, ffmpeg, notify, topics, tts, youtube
+from . import analytics, ffmpeg, notify, topics, tts, usage, youtube
 from .config import Settings
 from .history import History, now_iso
 from .llm import LLM, LLMConfigError
@@ -65,6 +65,7 @@ class Result:
     score: int | None = None
     language: str = ""
     variants: list[Result] = field(default_factory=list)
+    usage_run_id: str = ""
 
 
 def quota_day_start() -> str:
@@ -145,6 +146,7 @@ class Studio:
         self._refused_on = ""  # the quota day on which YouTube itself refused an upload
 
     def _step(self, stage: str, message: str = "") -> None:
+        usage.step(stage)
         if self.progress:
             try:
                 self.progress(stage, STAGES.get(stage, 0), message)
@@ -199,8 +201,10 @@ class Studio:
         raise RuntimeError(f"All voice engines failed: {last}")
 
     # ------------------------------------------------------------------ script only
+    @usage.tracked("draft")
     def draft(self, topic: str | None = None, *, source: str | None = None, style: str | None = None,
-              url: str | None = None, document: str | Path | None = None) -> tuple[Script, Topic, str]:
+              url: str | None = None, document: str | Path | None = None,
+              idea_id: int | None = None) -> tuple[Script, Topic, str]:
         """Pick a topic, write the script and let the Script Doctor improve it. Nothing is rendered."""
         s = self.s
         self._step("topic")
@@ -209,7 +213,8 @@ class Studio:
         elif document:
             pick = topics.from_document(document)
         else:
-            pick = pick_topic(s, self.history, explicit=topic, source=source)
+            pick = pick_topic(s, self.history, explicit=topic, source=source, idea_id=idea_id)
+        usage.annotate(title=pick.subject, idea_id=pick.idea_id)
         if topic and (url or document):
             pick.subject = f"{topic} (source: {pick.subject})"
         log.info("Topic [%s]: %s", pick.source, pick.subject)
@@ -229,10 +234,12 @@ class Studio:
         return script, pick, writer_llm.label if writer_llm else "offline"
 
     # ------------------------------------------------------------------ one video
+    @usage.tracked("make")
     def make(self, topic: str | None = None, *, source: str | None = None, upload: bool | None = None,
              style: str | None = None, script_file: str | Path | None = None, script: Script | None = None,
              url: str | None = None, document: str | Path | None = None,
-             languages: list[str] | None = None) -> Result:
+             languages: list[str] | None = None, idea_id: int | None = None,
+             usage_run_id: str | None = None, source_video_id: int | None = None) -> Result:
         t0 = time.time()
         s = self.s
         upload = s.upload if upload is None else upload
@@ -246,7 +253,8 @@ class Studio:
                 pick, writer = Topic(script.topic, "script"), ("script file" if script_file else "editor")
                 log.info("Script from %s (%d scenes): %s", script_file or "editor", len(script.scenes), script.title)
             else:
-                script, pick, writer = self.draft(topic, source=source, style=style, url=url, document=document)
+                script, pick, writer = self.draft(topic, source=source, style=style, url=url, document=document,
+                                                  idea_id=idea_id)
             return self.produce(script, pick, writer, upload=upload, t0=t0, languages=languages, state=state)
         except (youtube.NotAuthorized, LLMConfigError, KeyboardInterrupt):
             raise  # setup problems stop the run instead of failing every video the same way
@@ -324,14 +332,15 @@ class Studio:
             self._step("render", f"{s.width}x{s.height}")
             video = folder / ("short.mp4" if s.vertical else "video.mp4")
             render_video(s, media, [st.duration for st in timeline], speech.audio, total, plan, video, work)
+            final_duration = total / s.video_speed
 
             self._step("check")
             info = ffmpeg.probe(video)
-            if (info["width"], info["height"]) != s.resolution or abs(info["duration"] - total) > 0.5:
+            if (info["width"], info["height"]) != s.resolution or abs(info["duration"] - final_duration) > 0.5:
                 raise RuntimeError(f"Render check failed: got {info['width']}x{info['height']} "
-                                   f"{info['duration']:.2f}s, expected {s.width}x{s.height} {total:.2f}s")
-            extract_frame(video, min(1.2, total / 3), folder / "cover.jpg")
-            (folder / "captions.srt").write_text(srt(chunks), encoding="utf-8")
+                                   f"{info['duration']:.2f}s, expected {s.width}x{s.height} {final_duration:.2f}s")
+            extract_frame(video, min(1.2, final_duration / 3), folder / "cover.jpg")
+            (folder / "captions.srt").write_text(srt(chunks, speed=s.video_speed), encoding="utf-8")
 
             title = final_title(script, s)
             description = final_description(script, credits, s)
@@ -340,6 +349,7 @@ class Studio:
                 "category_id": script.category_id, "language": s.language,
                 "topic": script.topic, "source": pick.source, "style": script.style,
                 "duration": round(info["duration"], 2), "resolution": f"{s.width}x{s.height}",
+                "video_speed": s.video_speed,
                 "llm": writer, "score": script.score, "review": script.review, "cast": script.cast,
                 "voice": f"{speech.engine}:{speech.voice}", "timing": speech.timing,
                 "visuals": [{"source": m.source, "id": m.id, "kind": m.kind, "query": m.query} for m in media],
@@ -353,6 +363,7 @@ class Studio:
                 folder=str(folder), video_path=str(video), duration=info["duration"],
                 llm=meta["llm"], voice=meta["voice"], status="rendered", score=script.score, parent_id=parent_id)
             state["record_id"] = rid
+            usage.record_video(rid, title, video, info["duration"])
             if not media_map:
                 self.history.mark_media([m.key for m in media if m.source not in REUSABLE_SOURCES])
             if pick.key and not parent_id:
@@ -380,6 +391,7 @@ class Studio:
             if not os.getenv("KEEP_WORK"):
                 shutil.rmtree(work, ignore_errors=True)
 
+    @usage.tracked("translation", child=True)
     def _translation(self, script: Script, pick: Topic, writer: str, lang: str, s: Settings,
                      by_scene: dict[int, MediaItem], credits: set[str], parent_id: int, upload: bool) -> Result:
         t0 = time.time()

@@ -14,6 +14,7 @@ import re
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from . import usage
 from .config import Settings
 from .utils import clean_narration, strip_emoji, truncate_words
 
@@ -395,6 +396,7 @@ def word_count(text: str, language: str = "en") -> int:
     return len(text.split())
 
 
+@usage.stage("script")
 def write_script(llm, subject: str, settings: Settings, *, source: str = "niche",
                  avoid: list[str] | None = None, context: str = "", style: str | None = None,
                  insights: str = "") -> Script:
@@ -437,6 +439,7 @@ List the concrete problems in "issues" (max 5, short sentences, most important f
     return system, user
 
 
+@usage.stage("review")
 def review_script(llm, script: Script, settings: Settings) -> Script:
     """Score the script and (in rewrite mode) replace it with the improved version. Never fails the video:
     if the review call or its rewrite is unusable, the original script is kept."""
@@ -477,6 +480,7 @@ def review_script(llm, script: Script, settings: Settings) -> Script:
 # --------------------------------------------------------------------------------------------------
 # Translation — one idea, many languages, same footage.
 # --------------------------------------------------------------------------------------------------
+@usage.stage("translation", shared=False)
 def translate_script(llm, script: Script, language: str) -> Script:
     lang = LANGUAGES.get(language, language)
     src = {k: v for k, v in script.to_dict().items() if k not in ("style", "language", "score", "review")}

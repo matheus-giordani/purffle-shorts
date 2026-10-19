@@ -94,7 +94,7 @@ def test_keyed_pipeline_uploads_and_dedupes(online, monkeypatch):
     r = studio.make()
     assert r.ok, r.error
     assert r.status == "uploaded" and r.youtube_id == "vid1"
-    assert searches[:1] == ["octopus"]
+    assert {"octopus", "octopus gills", "ocean"} <= set(searches)  # searches run in parallel
     body = uploads[0]
     assert body["snippet"]["title"] == "Why Octopuses Have Three Hearts #shorts"
     assert body["snippet"]["categoryId"] == "28"

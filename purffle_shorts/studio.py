@@ -32,6 +32,7 @@ log = logging.getLogger("purffle")
 WEB = Path(__file__).parent / "web"
 FILES = ("short.mp4", "video.mp4", "cover.jpg", "captions.srt", "metadata.json", "script.json")
 STATIC = {"app.js": "text/javascript; charset=utf-8", "app.css": "text/css; charset=utf-8",
+          "costs.js": "text/javascript; charset=utf-8",
           "icon.svg": "image/svg+xml"}
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 
@@ -83,9 +84,13 @@ def _choice(value, allowed, default=None):
 
 class StudioServer:
     def __init__(self, settings: Settings):
+        from .costs import Costs
         from .pipeline import Studio
         self.settings = settings
         self.studio = Studio(settings)
+        self.costs = Costs(self.studio.history, settings)
+        self._cost_sync_lock = threading.Lock()
+        self.cost_sync = {"running": False, "updated": 0, "error": "", "checked_at": 0}
         self.token = secrets.token_urlsafe(24)
         self.jobs: dict[int, Job] = {}
         self.queue: queue.Queue[Job] = queue.Queue()
@@ -155,6 +160,8 @@ class StudioServer:
                 pass
         if p.get("aspect") in ASPECTS:
             ov["resolution"] = aspect_resolution(p["aspect"])
+        if "speed" in p:
+            ov["video_speed"] = p["speed"]  # Settings validates the finite 0.5–2.0 range.
         if isinstance(p.get("visuals"), list) and p["visuals"]:
             ov["visual_sources"] = [str(v).lower() for v in p["visuals"]][:6]
         if p.get("music") is False:
@@ -194,14 +201,36 @@ class StudioServer:
                 if job.status == "done":
                     job.pct = 100
                 self.current = None
+                self.sync_costs()
+
+    def sync_costs(self, *, force: bool = False) -> dict:
+        if not self.settings.openrouter_api_key:
+            return {**self.cost_sync, "error": "OPENROUTER_API_KEY is not configured"}
+        if (not force and time.time() - self.cost_sync["checked_at"] < 15) or not self._cost_sync_lock.acquire(False):
+            return self.cost_sync
+        self.cost_sync = {**self.cost_sync, "running": True}
+
+        def work():
+            try:
+                self.cost_sync.update(self.costs.reconcile(self.settings, force=force))
+            except Exception:
+                log.exception("Cost reconciliation failed")
+                self.cost_sync["error"] = "Could not refresh costs; try again."
+            finally:
+                self.cost_sync.update(running=False, checked_at=time.time())
+                self._cost_sync_lock.release()
+        threading.Thread(target=work, name="cost-reconciliation", daemon=True).start()
+        return self.cost_sync
 
     def _run(self, job: Job, studio, s: Settings, p: dict) -> bool:
         from .script import script_from_data
         if job.kind == "draft":
             script, pick, writer = studio.draft(p.get("topic") or None, source=p.get("source") or None,
                                                 style=s.style if s.style != "auto" else None,
-                                                url=p.get("url") or None)
-            job.result = {"script": script.to_dict(), "source": pick.source, "llm": writer}
+                                                url=p.get("url") or None,
+                                                idea_id=int(p["idea_id"]) if p.get("idea_id") else None)
+            job.result = {"script": script.to_dict(), "source": pick.source, "llm": writer,
+                          "usage_run_id": getattr(script, "_usage_run_id", "")}
             job.stage, job.pct = "done", 100
             return True
         if job.kind == "plan":
@@ -225,7 +254,10 @@ class StudioServer:
             langs = [x.strip().lower() for x in langs.split(",") if x.strip()]
         r = studio.make(p.get("topic") or None, source=p.get("source") or None, upload=bool(p.get("upload")),
                         style=s.style if s.style != "auto" else None, script=script, url=p.get("url") or None,
-                        languages=[str(x)[:8] for x in (langs or [])][:6])
+                        languages=[str(x)[:8] for x in (langs or [])][:6],
+                        idea_id=int(p["idea_id"]) if p.get("idea_id") else None,
+                        usage_run_id=str(p.get("usage_run_id") or "")[:32] or None,
+                        source_video_id=int(p["source_video_id"]) if p.get("source_video_id") else None)
         job.result = _result(r)
         return r.ok
 
@@ -301,6 +333,11 @@ class StudioServer:
         h = self.studio.history
         stats = h.stats()
         views = sum(r.get("views") or 0 for r in h.recent(1000))
+        self.sync_costs()
+        try:
+            budget_state = self.costs.budgets()
+        except Exception:
+            budget_state = {"rows": [], "alerts": [], "error": "Resource accounting is temporarily unavailable"}
         return {"version": __version__, "llm": llm, "llm_ok": llm_ok, "tts": s.tts_engine,
                 "llm_models": {stage: getattr(s, f"llm_model_{stage}") for stage in
                                ("planner", "script", "review", "translation", "clip")},
@@ -308,12 +345,13 @@ class StudioServer:
                 "voice": s.tts_voice or "auto", "visuals": s.visual_sources, "upload": s.upload,
                 "privacy": s.privacy, "quota_left": self.studio.quota_left(), "daily_limit": s.daily_upload_limit,
                 "language": s.language, "caption_style": s.caption_style, "caption_position": s.caption_position,
-                "duration": s.target_seconds, "style": s.style, "grade": s.color_grade, "transition": s.transition,
+                "duration": s.target_seconds, "speed": s.video_speed,
+                "style": s.style, "grade": s.color_grade, "transition": s.transition,
                 "review": s.script_review, "aspect": next((k for k, v in ASPECTS.items() if v == s.resolution),
                                                           f"{s.width}x{s.height}"),
                 "also_languages": s.also_languages, "learn_from_stats": s.learn_from_stats,
                 "counts": stats, "total": sum(stats.values()), "views": views,
-                "ideas": len(h.ideas("pending")), "channel": s.channel_name}
+                "ideas": len(h.ideas("pending")), "channel": s.channel_name, "costs": budget_state}
 
     def options(self) -> dict:
         from .llm import PRESETS, available_providers
@@ -346,7 +384,8 @@ class StudioServer:
 def _result(r) -> dict:
     return {"ok": r.ok, "title": r.title, "status": r.status, "youtube_id": r.youtube_id, "error": r.error,
             "id": r.record_id, "score": r.score, "language": r.language, "seconds": round(r.seconds, 1),
-            "variants": [_result(v) for v in getattr(r, "variants", [])]}
+            "variants": [_result(v) for v in getattr(r, "variants", [])],
+            "usage_run_id": getattr(r, "usage_run_id", "")}
 
 
 def _handler(app: StudioServer, bound_host: str):
@@ -401,6 +440,31 @@ def _handler(app: StudioServer, bound_host: str):
                 return self._json(app.info())
             if path == "/api/options":
                 return self._json(app.options())
+            if path.startswith("/api/costs"):
+                try:
+                    if path == "/api/costs":
+                        return self._json({**app.costs.overview(params), "sync": app.cost_sync})
+                    if path == "/api/costs/settings":
+                        return self._json(app.costs.settings())
+                    if path == "/api/costs/events":
+                        return self._json(app.costs.event_page(params))
+                    if path == "/api/costs/videos":
+                        return self._json(app.costs.video_page(params))
+                    if path == "/api/costs/export.csv":
+                        return self._send(200, app.costs.export(params).encode("utf-8-sig"),
+                                          "text/csv; charset=utf-8",
+                                          {"Content-Disposition": 'attachment; filename="purffle-costs.csv"'})
+                except (ValueError, ArithmeticError):
+                    return self._json({"error": "Invalid costs filter or value"}, 400)
+                except Exception:
+                    return self._json({"error": "Resource accounting is temporarily unavailable"}, 503)
+            m = re.fullmatch(r"/api/videos/(\d+)/costs", path)
+            if m:
+                try:
+                    details = app.costs.video_details(int(m.group(1)))
+                except Exception:
+                    return self._json({"error": "Resource accounting is temporarily unavailable"}, 503)
+                return self._json(details) if details else self._json({"error": "not found"}, 404)
             if path == "/api/videos":
                 return self._json(app.videos(params.get("status", ""), params.get("q", "")))
             m = re.fullmatch(r"/api/videos/(\d+)", path)
@@ -490,6 +554,27 @@ def _handler(app: StudioServer, bound_host: str):
                 return self._json({"error": "expected an object"}, 400)
             path = self.path
             h = app.studio.history
+            if path.startswith("/api/costs"):
+                try:
+                    if path == "/api/costs/settings":
+                        return self._json(app.costs.save_settings(body))
+                    if path == "/api/costs/sync":
+                        return self._json(app.sync_costs(force=True), 202)
+                    if path == "/api/costs/alerts":
+                        if not isinstance(body.get("alerts"), list) or not all(
+                                isinstance(a, dict) for a in body["alerts"]):
+                            raise ValueError("Expected a list of alerts")
+                        app.costs.acknowledge(body["alerts"])
+                        return self._json({"ok": True})
+                except (ValueError, ArithmeticError):
+                    return self._json({"error": "Invalid cost settings; check prices, budgets and exchange rate"}, 400)
+                except Exception:
+                    return self._json({"error": "Resource accounting is temporarily unavailable"}, 503)
+            if path in ("/api/make", "/api/clip") and "speed" in body:
+                try:
+                    app.settings.with_overrides(video_speed=body["speed"])
+                except ValueError:
+                    return self._json({"error": "Final video speed must be between 0.5 and 2.0"}, 400)
             if path in ("/api/make", "/api/draft"):
                 kind = "make" if path == "/api/make" else "draft"
                 label = (body.get("script") or {}).get("title") if isinstance(body.get("script"), dict) else None

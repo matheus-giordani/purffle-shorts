@@ -154,6 +154,17 @@ Open-source Shorts tools each cover part of the job: some write videos from a to
 
 The library: every video with its format, language, length and status. Open one to play it, edit and re-render it, upload or delete it.
 
+**Costs** tracks model calls, tokens, images, audio/video seconds, failures and output sizes. See costs by model,
+video or execution; filter the full history and export CSV. In **Budgets & prices**, set monthly USD budgets
+(total, provider or model), estimate prices and an optional manual USD/BRL exchange rate. Alerts at 80% and 100%
+do not stop generation. OpenRouter charges are read from usage and reconciled in the background; estimates and
+unknown charges stay clearly labeled. Tracking starts when this version is installed. [Accounting and API details](docs/costs.md).
+
+**Final video speed** in Create and Clip exports at **0.5×–2×** with synchronized audio, overlays and captions.
+Voice pitch is preserved. A 40-second narration at 2× produces about 20 seconds of video. CLI:
+`uv run purffle-shorts make --speed 1.25 --no-upload`, or set `VIDEO_SPEED=1.25` in `.env`.
+Speed changes the final timeline; the original generated resources still count toward usage.
+
 <p align="center"><img src="https://raw.githubusercontent.com/Chamanrajragu/purffle-shorts/main/docs/studio-library.png" alt="PurffleShorts Studio Library page showing rendered Shorts as thumbnails with status, format, language and duration" width="880"></p>
 
 **Command line**: `doctor` checks the setup, `make` renders a Short.
@@ -420,6 +431,7 @@ The Studio's **AI & publishing → Choose a model for each stage** fields can ov
 | Music | Drop tracks in `music/` (a random one is picked per video; `back.mp3` still works); `MUSIC_VOLUME`, `MUSIC_DUCKING` |
 | Shape | `ASPECT=9:16` (Shorts, Reels, TikTok) · `16:9` (regular YouTube video, no `#shorts`) · `1:1` · `4:5`, or an exact `RESOLUTION=1080x1920` |
 | Output | `FPS=30`, `VIDEO_ENCODER=libx264` · `h264_videotoolbox` (Mac) · `h264_nvenc` (NVIDIA) · `auto` (a hardware encoder that fails falls back to libx264) |
+| Final speed | `VIDEO_SPEED=1.0` or `--speed 1.25`; range 0.5–2.0, including audio, overlays and exported SRT timestamps |
 
 The caption font is downloaded once from Google Fonts (Anton for Latin scripts, Noto Sans for other scripts). Set `CAPTION_FONT=/path/font.ttf` to use your own.
 

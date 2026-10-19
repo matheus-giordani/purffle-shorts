@@ -71,6 +71,7 @@ async function post(url, body) {
 const S = {
   info: null, options: null, jobs: [], view: "create",
   form: store.get("form", {}), draft: store.get("draft", null), createJob: store.get("createJob", null),
+  draftSource: store.get("draftSource", {}),
   lib: { status: "", q: "" }, seen: new Map(), voices: {},
 };
 
@@ -108,7 +109,7 @@ function sel(name, opts, cur) {
 const shortTitle = t => (t || "").replace(/\s*#shorts$/i, "");
 const words = t => (t || "").trim().split(/\s+/).filter(Boolean).length;
 const saveForm = () => store.set("form", S.form);
-const saveDraft = () => store.set("draft", S.draft);
+const saveDraft = () => { store.set("draft", S.draft); store.set("draftSource", S.draftSource); };
 
 // ------------------------------------------------------------------ boot & routing
 async function boot() {
@@ -121,6 +122,7 @@ async function boot() {
   const i = S.info;
   S.form = Object.assign({
     mode: "topic", topic: "", url: "", style: i.style || "auto", language: i.language, duration: i.duration,
+    speed: i.speed || 1,
     aspect: ["9:16", "16:9", "1:1", "4:5"].includes(i.aspect) ? i.aspect : "9:16", caption_style: i.caption_style,
     caption_position: i.caption_position, grade: i.grade, transition: i.transition, review: i.review, tts: i.tts,
     voice: "", voice_b: "", provider: "", model: "", also_langs: (i.also_languages || []).join(", "), music: true,
@@ -134,7 +136,14 @@ async function boot() {
   window.addEventListener("hashchange", route);
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") closeDrawer();
-    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && S.view === "create") startMake();
+    if (e.key === "Tab" && !$("#drawer").hidden) {
+      const controls = $$('#drawer-panel button, #drawer-panel a[href], #drawer-panel input, #drawer-panel select, #drawer-panel summary, #drawer-panel video[controls]')
+        .filter(el => !el.disabled && el.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && S.view === "create" && $("#drawer").hidden) startMake();
   });
   $("#drawer").addEventListener("click", e => { if (e.target.closest("[data-close]")) closeDrawer(); });
   route();
@@ -151,9 +160,10 @@ function status() {
   const ib = $("#ibadge");
   ib.hidden = !i.ideas;
   ib.textContent = i.ideas;
+  showCostAlerts(i.costs);
 }
 
-const VIEWS = { create: viewCreate, library: viewLibrary, queue: viewQueue, ideas: viewIdeas, clip: viewClip, channel: viewChannel, system: viewSystem };
+const VIEWS = { create: viewCreate, library: viewLibrary, queue: viewQueue, ideas: viewIdeas, clip: viewClip, channel: viewChannel, costs: viewCosts, system: viewSystem };
 function route() {
   const v = (location.hash || "#create").slice(1).split("/")[0];
   S.view = VIEWS[v] ? v : "create";
@@ -192,6 +202,7 @@ function finished(j) {
     S.createJob.loaded = true;
     store.set("createJob", S.createJob);
     S.draft = r.script;
+    S.draftSource = { usage_run_id: r.usage_run_id || "" };
     saveDraft();
     toast("Script ready — read it, edit anything, then render.", "ok");
     if (S.view === "create") drawSide();
@@ -225,7 +236,8 @@ document.addEventListener("click", e => {
 function payload(extra = {}) {
   const f = S.form;
   const p = {
-    style: f.style === "auto" ? "" : f.style, language: f.language, duration: f.duration, aspect: f.aspect,
+    style: f.style === "auto" ? "" : f.style, language: f.language, duration: f.duration, speed: f.speed,
+    aspect: f.aspect,
     caption_style: f.caption_style, caption_position: f.caption_position, grade: f.grade, transition: f.transition,
     tts: f.tts, voice: f.voice, voice_b: f.voice_b, provider: f.provider, model: f.model, review: f.review,
     ...modelPayload(),
@@ -235,7 +247,7 @@ function payload(extra = {}) {
   if (f.mode === "topic") p.topic = f.topic.trim();
   if (f.mode === "url") p.url = f.url.trim();
   if (f.mode === "queue") p.source = "queue";
-  return Object.assign(p, extra);
+  return Object.assign(p, extra.script ? S.draftSource : {}, extra);
 }
 function modelPayload() {
   const f = S.form;
@@ -305,8 +317,10 @@ function drawForm() {
     <h2>Shape & voice</h2>
     <div class="grid2">
       <div class="field"><label>Language</label>${sel("language", langs.map(([c, n]) => [c, `${n} (${c})`]), f.language)}</div>
-      <div class="field"><label>Length</label><div class="range-row"><input type="range" min="15" max="120" step="5" data-f="duration" value="${f.duration}" aria-label="Length in seconds"><output id="dur-out">${f.duration}s</output></div></div>
+      <div class="field"><label>Narration length</label><div class="range-row"><input type="range" min="15" max="120" step="5" data-f="duration" value="${f.duration}" aria-label="Narration length in seconds"><output id="dur-out">${f.duration}s</output></div></div>
     </div>
+    <div class="field"><label for="video-speed">Final video speed</label><div class="range-row"><input id="video-speed" type="range" min="0.5" max="2" step="0.05" data-f="speed" value="${f.speed}" aria-describedby="speed-hint"><output id="speed-out">${+Number(f.speed).toFixed(2)}×</output></div>
+      <p class="hint" id="speed-hint">About ${Math.round(f.duration / f.speed)}s after export. Voice pitch is preserved; music and captions follow the same speed.</p></div>
     <div class="field"><label>Aspect</label>${seg("aspect", [["9:16", '<i class="shape s916"></i>9:16 Short'], ["16:9", '<i class="shape s169"></i>16:9 YouTube'], ["1:1", '<i class="shape s11"></i>1:1 Square'], ["4:5", '<i class="shape s45"></i>4:5 Feed']], f.aspect)}</div>
     <div class="grid2">
       <div class="field"><label>Voice engine</label>${sel("tts", o.tts.map(t => [t, { edge: "Microsoft neural (free)", openai: "OpenAI", openrouter: "OpenRouter", elevenlabs: "ElevenLabs", kokoro: "Kokoro (local)", coqui: "Coqui (local)", system: "System voice" }[t] || t]), f.tts)}</div>
@@ -382,6 +396,10 @@ function bindForm() {
     } else if (el.dataset.f) {
       S.form[el.dataset.f] = el.type === "checkbox" ? el.checked : el.type === "range" ? +el.value : el.value;
       if (el.dataset.f === "duration") $("#dur-out").textContent = el.value + "s";
+      if (["duration", "speed"].includes(el.dataset.f)) {
+        $("#speed-out").textContent = `${+Number(S.form.speed).toFixed(2)}×`;
+        $("#speed-hint").textContent = `About ${Math.round(S.form.duration / S.form.speed)}s after export. Voice pitch is preserved; music and captions follow the same speed.`;
+      }
       if (el.dataset.f === "language" || el.dataset.f === "tts") loadVoices();
     }
     saveForm();
@@ -566,6 +584,7 @@ async function drawLibrary() {
 }
 
 async function openVideo(id) {
+  const opener = document.activeElement;
   let v;
   try { v = await get("/api/videos/" + id); } catch (e) { return toast(esc(e.message), "bad"); }
   const m = v.metadata || {}, sc = v.script;
@@ -598,20 +617,23 @@ async function openVideo(id) {
         <dt>Made</dt><dd>${esc(new Date(v.created_at).toLocaleString())}</dd>
         <dt>Folder</dt><dd class="mono">${esc(v.folder || "")}</dd>
       </dl>
+      <section id="video-costs" class="video-costs" aria-live="polite"><p class="hint">Loading resource usage…</p></section>
       ${v.description ? `<div class="desc">${esc(v.description)}</div>` : ""}
       ${v.tags && v.tags.length ? `<div class="chips">${v.tags.map(t => `<span class="chip">${esc(t)}</span>`).join("")}</div>` : ""}
     </div>`;
   paint(panel);
-  $("#drawer").hidden = false;
-  document.body.style.overflow = "hidden";
+  loadVideoCosts(id, $("#video-costs", panel));
+  showDrawer(opener);
   const up = $("#d-up");
   if (up) up.onclick = async () => { up.disabled = true; try { await post("/api/upload/" + id); toast("Upload queued — follow it in Queue.", "info"); tick(); } catch (e) { toast(esc(e.message), "bad"); } };
   const ed = $("#d-edit");
   if (ed) ed.onclick = () => {
     S.draft = Object.assign({}, sc, { title: (sc.title || "").replace(/\s*#shorts$/i, "") });
+    S.draftSource = { source_video_id: id };
     saveDraft();
     if (sc.language) S.form.language = sc.language;
     if (sc.style) S.form.style = sc.style;
+    S.form.speed = m.video_speed || 1;
     saveForm();
     closeDrawer();
     location.hash = "#create";
@@ -622,12 +644,30 @@ async function openVideo(id) {
     try { await post(`/api/videos/${id}/delete`); closeDrawer(); toast("Deleted.", "ok"); drawLibrary(); } catch (e) { toast(esc(e.message), "bad"); }
   };
 }
+let drawerOpener = null;
+let drawerOpenerSelector = "";
+function showDrawer(opener = document.activeElement) {
+  const drawer = $("#drawer");
+  if (drawer.hidden) {
+    drawerOpener = opener;
+    drawerOpenerSelector = opener.id ? "#" + CSS.escape(opener.id)
+      : opener.dataset.costVideo ? `[data-cost-video="${CSS.escape(opener.dataset.costVideo)}"]`
+      : opener.dataset.open ? `[data-open="${CSS.escape(opener.dataset.open)}"]` : "";
+  }
+  drawer.hidden = false;
+  $(".app").inert = true;
+  document.body.style.overflow = "hidden";
+  $("#drawer-panel [data-close]")?.focus();
+}
 function closeDrawer() {
   const d = $("#drawer");
   if (d.hidden) return;
   $$("video", d).forEach(v => v.pause());
   d.hidden = true;
+  $(".app").inert = false;
   document.body.style.overflow = "";
+  const replacement = drawerOpenerSelector ? document.querySelector(drawerOpenerSelector) : null;
+  (drawerOpener?.isConnected ? drawerOpener : replacement || $("#main"))?.focus({ preventScroll: true });
 }
 
 // ------------------------------------------------------------------ QUEUE
@@ -720,9 +760,7 @@ async function viewIdeas() {
     if (d) { await post(`/api/ideas/${d.dataset.del}/delete`).catch(() => {}); viewIdeas(); refreshInfo(); }
     if (m) {
       const idea = data.pending.find(i => i.id === +m.dataset.make);
-      await post(`/api/ideas/${idea.id}/delete`).catch(() => {});
-      const topic = idea.notes ? `${idea.subject} (angle: ${idea.notes})` : idea.subject;
-      try { await post("/api/make", payload({ topic, url: "", source: "", style: idea.style || "" })); toast("Making it now — see Queue.", "info"); tick(); viewIdeas(); refreshInfo(); }
+      try { await post("/api/make", payload({ idea_id: idea.id, topic: "", url: "", source: "queue", style: idea.style || "" })); toast("Making it now — see Queue.", "info"); tick(); viewIdeas(); refreshInfo(); }
       catch (err) { toast(esc(err.message), "bad"); }
     }
   };
@@ -732,6 +770,7 @@ async function refreshInfo() { try { S.info = await get("/api/info"); status(); 
 // ------------------------------------------------------------------ CLIP
 function viewClip() {
   const c = Object.assign({ source: "", count: 3, crop: "center", upload: false,
+    speed: S.info.speed || 1,
     model: S.info.llm_models?.clip || "", transcription_model: S.info.clip_transcription_model || "" }, store.get("clip", {}));
   $("#main").innerHTML = `
   <div class="page-head"><div><h1>Clip a long video</h1><p>Turn a podcast, interview, talk or stream into Shorts of its best moments.</p></div></div>
@@ -742,6 +781,7 @@ function viewClip() {
         <div class="field"><label>Clips</label><div class="range-row"><input type="range" id="c-n" min="1" max="10" value="${c.count}"><output id="c-out">${c.count}</output></div></div>
         <div class="field"><label>Framing</label>${seg("crop", [["center", "Fill (crop)"], ["blur", "Fit + blur"]], c.crop)}</div>
       </div>
+      <div class="field"><label for="c-speed">Final video speed</label><div class="range-row"><input type="range" id="c-speed" min="0.5" max="2" step="0.05" value="${c.speed}" aria-describedby="c-speed-hint"><output id="c-speed-out">${+Number(c.speed).toFixed(2)}×</output></div><p class="hint" id="c-speed-hint">Applied after selecting moments. Audio keeps its pitch and captions stay synchronized.</p></div>
       <div class="field"><label>Model for choosing clips</label><input type="text" id="c-model" value="${esc(c.model)}" placeholder="inherit default"></div>
       <div class="field"><label>OpenRouter transcription model (optional)</label><input type="text" id="c-transcription-model" value="${esc(c.transcription_model)}" placeholder="e.g. elevenlabs/scribe-v2"><p class="hint">Requires word-level timestamps. Blank uses faster-whisper or OpenAI.</p></div>
       <div class="field"><label class="switch"><input type="checkbox" id="c-up"${c.upload ? " checked" : ""}${S.info.upload ? "" : " disabled"}><span>Upload the clips when done</span></label></div>
@@ -755,6 +795,7 @@ function viewClip() {
   </div>`;
   const save = () => store.set("clip", c);
   $("#c-n").oninput = e => { c.count = +e.target.value; $("#c-out").textContent = c.count; save(); };
+  $("#c-speed").oninput = e => { c.speed = +e.target.value; $("#c-speed-out").textContent = `${+c.speed.toFixed(2)}×`; save(); };
   $("#c-src").oninput = e => { c.source = e.target.value; save(); };
   $("#c-model").oninput = e => { c.model = e.target.value; save(); };
   $("#c-transcription-model").oninput = e => { c.transcription_model = e.target.value; save(); };
@@ -765,7 +806,7 @@ function viewClip() {
   });
   $("#c-go").onclick = async () => {
     if (!c.source.trim()) return toast("Give a video file path or URL.", "bad");
-    try { await post("/api/clip", { source: c.source.trim(), count: c.count, crop: c.crop, upload: c.upload,
+    try { await post("/api/clip", { source: c.source.trim(), count: c.count, crop: c.crop, upload: c.upload, speed: c.speed,
       provider: S.form.provider, model: S.form.model, ...modelPayload(),
       model_clip: c.model, clip_transcription_model: c.transcription_model }); toast("Clipping… follow it in Queue.", "info"); tick(); }
     catch (e) { toast(esc(e.message), "bad"); }

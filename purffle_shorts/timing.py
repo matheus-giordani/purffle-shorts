@@ -201,7 +201,7 @@ def caption_chunks(words: list[Word], max_words: int = 3, max_chars: int = 20, t
     return chunks
 
 
-def srt(chunks: list[Chunk]) -> str:
+def srt(chunks: list[Chunk], speed: float = 1.0) -> str:
     def ts(t: float) -> str:
         ms = int(round(t * 1000))
         h, ms = divmod(ms, 3_600_000)
@@ -210,5 +210,5 @@ def srt(chunks: list[Chunk]) -> str:
         return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
     lines = []
     for i, c in enumerate(chunks, 1):
-        lines += [str(i), f"{ts(c.start)} --> {ts(c.end)}", c.text, ""]
+        lines += [str(i), f"{ts(c.start / speed)} --> {ts(c.end / speed)}", c.text, ""]
     return "\n".join(lines)

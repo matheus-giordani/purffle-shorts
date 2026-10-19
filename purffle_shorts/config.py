@@ -6,6 +6,7 @@ SHORTS_CAPTION_FONTSIZE, SHORTS_BATCH_SIZE, SHORTS_BATCH_DELAY, GOOGLE_CLIENT_SE
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
@@ -143,6 +144,7 @@ class Settings:
     # --- render ---------------------------------------------------------------------------
     resolution: tuple[int, int] = (1080, 1920)
     fps: int = 30
+    video_speed: float = 1.0          # final playback speed, including audio and captions (0.5–2.0)
     video_encoder: str = "libx264"    # libx264|h264_videotoolbox|h264_nvenc|auto
     crf: int = 21
     preset: str = "veryfast"
@@ -198,6 +200,14 @@ class Settings:
     pollinations_api_key: str = ""
 
     offline: bool = False             # demo mode: no network LLM, generated visuals
+
+    def __post_init__(self) -> None:
+        try:
+            self.video_speed = float(self.video_speed)
+        except (ValueError, TypeError):
+            raise ConfigError("VIDEO_SPEED must be a number between 0.5 and 2.0") from None
+        if not math.isfinite(self.video_speed) or not 0.5 <= self.video_speed <= 2.0:
+            raise ConfigError("VIDEO_SPEED must be between 0.5 and 2.0")
 
     @property
     def width(self) -> int:
@@ -299,6 +309,7 @@ class Settings:
             prefer_4k=_bool(_env("PREFER_4K", "false")),
             resolution=resolution,
             fps=max(1, _int("FPS", d.fps, "SHORTS_FPS")),
+            video_speed=_float("VIDEO_SPEED", d.video_speed),
             video_encoder=_env("VIDEO_ENCODER", d.video_encoder),
             crf=_int("CRF", d.crf),
             preset=_env("PRESET", d.preset),

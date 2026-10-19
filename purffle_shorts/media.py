@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 
+from . import usage
 from .config import Settings
 from .utils import PermanentError, download, http, raise_for_status, redact, with_retries
 
@@ -65,6 +66,7 @@ def _pexels_pick_file(files: list[dict], prefer_4k: bool) -> dict | None:
     return max(files, key=short)
 
 
+@usage.free_call("pexels", "video-search")
 def pexels_videos(query: str, key: str, prefer_4k: bool = False, orientation: str = "portrait") -> list[MediaItem]:
     params = {"query": query, "per_page": 15, "size": "medium"}
     if orientation:
@@ -81,6 +83,7 @@ def pexels_videos(query: str, key: str, prefer_4k: bool = False, orientation: st
     return items
 
 
+@usage.free_call("pexels", "photo-search")
 def pexels_photos(query: str, key: str, orientation: str = "portrait") -> list[MediaItem]:
     params = {"query": query, "per_page": 15}
     if orientation:
@@ -100,6 +103,7 @@ def pexels_photos(query: str, key: str, orientation: str = "portrait") -> list[M
 
 
 # ------------------------------------------------------------------------------------------ Pixabay
+@usage.free_call("pixabay", "video-search")
 def pixabay_videos(query: str, key: str, prefer_4k: bool = False) -> list[MediaItem]:
     r = http().get("https://pixabay.com/api/videos/", timeout=30, params={
         "key": key, "q": query[:100], "per_page": 20, "safesearch": "true"})
@@ -116,6 +120,7 @@ def pixabay_videos(query: str, key: str, prefer_4k: bool = False) -> list[MediaI
     return items
 
 
+@usage.free_call("pixabay", "photo-search")
 def pixabay_photos(query: str, key: str, orientation: str = "portrait") -> list[MediaItem]:
     pix = {"portrait": "vertical", "landscape": "horizontal"}.get(orientation, "all")
     r = http().get("https://pixabay.com/api/", timeout=30, params={
@@ -128,6 +133,7 @@ def pixabay_photos(query: str, key: str, orientation: str = "portrait") -> list[
 
 
 # ------------------------------------------------------------------------------------------ AI images
+@usage.stage("image")
 def openai_image(prompt: str, dest: Path, key: str, model: str, orientation: str = "portrait") -> Path:
     body = {"model": model, "prompt": prompt, "n": 1}
     if model.startswith("dall-e"):
@@ -138,19 +144,22 @@ def openai_image(prompt: str, dest: Path, key: str, model: str, orientation: str
         body.update(size=size, quality="medium")
 
     def _do():
-        r = http().post("https://api.openai.com/v1/images/generations", json=body, timeout=240,
-                        headers={"Authorization": f"Bearer {key}"})
-        raise_for_status(r, "OpenAI image")
-        d = r.json()["data"][0]
-        if d.get("b64_json"):
-            dest.write_bytes(base64.b64decode(d["b64_json"]))
-        else:
-            download(d["url"], dest)
-        return dest
+        with usage.request("openai", model, images=1) as call:
+            r = http().post("https://api.openai.com/v1/images/generations", json=body, timeout=240,
+                            headers={"Authorization": f"Bearer {key}"})
+            call.capture(r)
+            raise_for_status(r, "OpenAI image")
+            d = r.json()["data"][0]
+            if d.get("b64_json"):
+                dest.write_bytes(base64.b64decode(d["b64_json"]))
+            else:
+                download(d["url"], dest)
+            return dest
 
     return with_retries(_do, attempts=2, label="OpenAI image")
 
 
+@usage.stage("image")
 def openrouter_image(prompt: str, dest: Path, settings: Settings) -> Path:
     if not settings.openrouter_api_key:
         raise PermanentError("VISUAL_SOURCES=openrouter-images needs OPENROUTER_API_KEY")
@@ -161,21 +170,24 @@ def openrouter_image(prompt: str, dest: Path, settings: Settings) -> Path:
                "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts", "X-Title": "PurffleShorts"}
 
     def _do():
-        r = http().post("https://openrouter.ai/api/v1/images", json=body, headers=headers, timeout=240)
-        raise_for_status(r, "OpenRouter image")
-        images = r.json().get("data") or []
-        if not images or not images[0].get("b64_json"):
-            raise PermanentError("OpenRouter image response did not contain image data")
-        image = base64.b64decode(images[0]["b64_json"])
-        suffix = (".jpg" if image.startswith(b"\xff\xd8\xff") else
-                  ".webp" if image.startswith(b"RIFF") and image[8:12] == b"WEBP" else ".png")
-        path = dest.with_suffix(suffix)
-        path.write_bytes(image)
-        return path
+        with usage.request("openrouter", settings.openrouter_image_model, images=1) as call:
+            r = http().post("https://openrouter.ai/api/v1/images", json=body, headers=headers, timeout=240)
+            call.capture(r)
+            raise_for_status(r, "OpenRouter image")
+            images = r.json().get("data") or []
+            if not images or not images[0].get("b64_json"):
+                raise PermanentError("OpenRouter image response did not contain image data")
+            image = base64.b64decode(images[0]["b64_json"])
+            suffix = (".jpg" if image.startswith(b"\xff\xd8\xff") else
+                      ".webp" if image.startswith(b"RIFF") and image[8:12] == b"WEBP" else ".png")
+            path = dest.with_suffix(suffix)
+            path.write_bytes(image)
+            return path
 
     return with_retries(_do, attempts=2, label="OpenRouter image")
 
 
+@usage.stage("video")
 def openrouter_video(prompt: str, dest: Path, settings: Settings, seconds: float) -> Path:
     if not settings.openrouter_api_key:
         raise PermanentError("VISUAL_SOURCES=openrouter-video needs OPENROUTER_API_KEY")
@@ -186,29 +198,35 @@ def openrouter_video(prompt: str, dest: Path, settings: Settings, seconds: float
     headers = {"Authorization": f"Bearer {settings.openrouter_api_key}",
                "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts", "X-Title": "PurffleShorts"}
     api = "https://openrouter.ai/api/v1/videos"
-    r = http().post(api, json=body, headers=headers, timeout=60)
-    raise_for_status(r, "OpenRouter video")
-    job_id = r.json().get("id")
-    if not job_id:
-        raise PermanentError("OpenRouter video response did not contain a job id")
-
-    deadline = time.monotonic() + 600
-    while time.monotonic() < deadline:
-        r = http().get(f"{api}/{quote(str(job_id), safe='')}", headers=headers, timeout=30)
-        raise_for_status(r, "OpenRouter video status")
-        status = r.json()
-        if status.get("status") == "completed":
-            return download(f"{api}/{quote(str(job_id), safe='')}/content?index=0", dest,
-                            headers=headers, timeout=120)
-        if status.get("status") in ("failed", "cancelled", "expired"):
-            raise PermanentError(f"OpenRouter video {status.get('status')}: {status.get('error', 'unknown error')}")
-        time.sleep(5)
-    raise TimeoutError("OpenRouter video generation did not finish within 10 minutes")
+    with usage.request("openrouter", settings.openrouter_video_model, video_seconds=body["duration"]) as call:
+        r = http().post(api, json=body, headers=headers, timeout=60)
+        call.capture(r)
+        raise_for_status(r, "OpenRouter video")
+        job_id = r.json().get("id")
+        if not job_id:
+            raise PermanentError("OpenRouter video response did not contain a job id")
+        call.event["job_id"] = str(job_id)
+        call.event["request_id"] = r.json().get("generation_id")
+        call.checkpoint()
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            r = http().get(f"{api}/{quote(str(job_id), safe='')}", headers=headers, timeout=30)
+            raise_for_status(r, "OpenRouter video status")
+            status = r.json()
+            call.capture(r, status)
+            if status.get("status") == "completed":
+                return download(f"{api}/{quote(str(job_id), safe='')}/content?index=0", dest,
+                                headers=headers, timeout=120)
+            if status.get("status") in ("failed", "cancelled", "expired"):
+                raise PermanentError(f"OpenRouter video {status.get('status')}: {status.get('error', 'unknown error')}")
+            time.sleep(5)
+        raise TimeoutError("OpenRouter video generation did not finish within 10 minutes")
 
 
 _POLLINATIONS_LOCK = threading.Lock()
 
 
+@usage.stage("image")
 def pollinations_image(prompt: str, dest: Path, width: int, height: int, key: str = "") -> Path:
     url = (f"https://image.pollinations.ai/prompt/{quote(prompt[:900])}"
            f"?width={width}&height={height}&nologo=true&model=flux&seed={random.randint(1, 10**9)}")
@@ -216,7 +234,10 @@ def pollinations_image(prompt: str, dest: Path, width: int, height: int, key: st
     # One request at a time: parallel scenes would all be rate-limited. Since September 2026 anonymous
     # use is limited to roughly one image every few minutes (HTTP 402 "payment required" otherwise).
     with _POLLINATIONS_LOCK:
-        return download(url, dest, headers=headers, timeout=180, max_bytes=30 * 1024 * 1024)
+        def attempt():
+            with usage.request("pollinations", "flux", images=1):
+                return download(url, dest, headers=headers, timeout=180, max_bytes=30 * 1024 * 1024, attempts=1)
+        return with_retries(attempt, attempts=3, label="Pollinations image")
 
 
 # ------------------------------------------------------------------------------------------ selection
@@ -292,6 +313,7 @@ class Visuals:
         self._search_cache[ck] = items
         return items
 
+    @usage.free_call("local", "media-folder")
     def _local(self, query: str) -> list[MediaItem]:
         root = Path(self.s.media_dir)
         if not root.is_dir():
@@ -416,6 +438,8 @@ class Visuals:
                 log.info("Scene %d: %s %s (%r)", idx + 1, item.source, item.kind, q)
                 return item
         log.info("Scene %d: no footage found for %r — using an animated background", idx + 1, query)
+        with usage.request("local", "animated-background", free=True, video_seconds=need):
+            pass
         return MediaItem("generated", f"gradient-{idx}", "generated", query=query)
 
     def for_scenes(self, jobs: list[tuple[str, str, float]], topic: str, dest_dir: Path) -> list[MediaItem]:
@@ -424,5 +448,6 @@ class Visuals:
         workers = 2 if any(s in ("openai-images", "ai", "openrouter-images", "openrouter-video", "pollinations")
                            for s in self.sources) else 4
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(self.for_scene, i, q, p, topic, need, dest_dir) for i, (q, p, need) in enumerate(jobs)]
+            futs = [usage.submit(ex, self.for_scene, i, q, p, topic, need, dest_dir)
+                    for i, (q, p, need) in enumerate(jobs)]
             return [f.result() for f in futs]

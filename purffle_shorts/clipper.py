@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
-from . import ffmpeg, tts
+from . import ffmpeg, tts, usage
 from .config import Settings
 from .llm import LLMConfigError
 from .overlays import build_overlays
@@ -112,7 +112,9 @@ def fetch_source(src: str, dest_dir: Path) -> Path:
     return p
 
 
+@usage.stage("transcription")
 def transcribe(video: Path, work: Path, settings: Settings) -> list[Word]:
+    usage.step("transcription")
     work.mkdir(parents=True, exist_ok=True)
     audio = work / "audio.mp3"
     ffmpeg.run(["-i", str(video), "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k", str(audio)], label="extract audio")
@@ -123,7 +125,8 @@ def transcribe(video: Path, work: Path, settings: Settings) -> list[Word]:
         if audio.stat().st_size > 24 * 1024 * 1024:
             raise PermanentError("That audio is too large for OpenRouter transcription (25 MB limit). "
                                  "Install faster-whisper or shorten the source.")
-        with open(audio, "rb") as f:
+        with usage.request("openrouter", settings.clip_transcription_model,
+                           audio_seconds=ffmpeg.duration(audio)) as call, open(audio, "rb") as f:
             r = http().post(
                 "https://openrouter.ai/api/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
@@ -132,10 +135,13 @@ def transcribe(video: Path, work: Path, settings: Settings) -> list[Word]:
                 data={"model": settings.clip_transcription_model, "language": lang,
                       "response_format": "verbose_json", "timestamp_granularities[]": "word"},
                 files={"file": (audio.name, f, "audio/mpeg")}, timeout=180)
-        raise_for_status(r, "OpenRouter transcription")
-        data = r.json()
+            call.capture(r)
+            raise_for_status(r, "OpenRouter transcription")
+            data = r.json()
         if not isinstance(data, dict):
-            raise PermanentError("OpenRouter transcription did not return a JSON object")
+            error = PermanentError("OpenRouter transcription did not return a JSON object")
+            usage.invalid_reply(error)
+            raise error
         segments = [segment for segment in data.get("segments") or [] if isinstance(segment, dict)]
         raw_words = data.get("words") or [w for segment in segments for w in segment.get("words") or []]
         words = []
@@ -150,8 +156,10 @@ def transcribe(video: Path, work: Path, settings: Settings) -> list[Word]:
             if text and end >= start:
                 words.append(Word(text, start, end))
         if not words:
-            raise PermanentError("The selected transcription model returned no word timestamps. "
-                                 "Choose a model with word-level timestamps or use faster-whisper.")
+            error = PermanentError("The selected transcription model returned no word timestamps. "
+                                   "Choose a model with word-level timestamps or use faster-whisper.")
+            usage.invalid_reply(error)
+            raise error
         log.info("Transcribed %d words with OpenRouter (%s)", len(words), settings.clip_transcription_model)
         return words
     try:
@@ -233,6 +241,7 @@ def _snap(sents: list[Sentence], start: float, end: float, min_s: float, max_s: 
     return (s0, e0) if e0 - s0 >= min(min_s, 5.0) else None
 
 
+@usage.stage("clip")
 def pick_clips(llm, sents: list[Sentence], settings: Settings, count: int, min_s: int = 20,
                max_s: int = 58) -> list[ClipPlan]:
     if llm is None:  # offline: windows spread evenly over the whole video, each starting on a sentence
@@ -305,9 +314,10 @@ def render_clip(settings: Settings, source: Path, plan: ClipPlan, words: list[Wo
     overlay = build_overlays(s, chunks, dur, plan.hook_text, work)
     video = folder / ("short.mp4" if s.vertical else "video.mp4")
     compose(s, [seg], [dur], voice, dur, overlay, video, work, None)
-    return video, chunks, dur
+    return video, chunks, dur / s.video_speed
 
 
+@usage.tracked("clip")
 def make_clips(studio, src: str, *, count: int = 3, crop: str = "center", upload: bool | None = None,
                min_seconds: int = 20, max_seconds: int = 58) -> list:
     """Returns one pipeline.Result per clip."""
@@ -357,13 +367,14 @@ def make_clips(studio, src: str, *, count: int = 3, crop: str = "center", upload
                 video, chunks, dur = render_clip(s, source, plan, words, folder, crop)
                 out = ffmpeg.probe(video)
                 extract_frame(video, min(1.2, dur / 3), folder / "cover.jpg")
-                (folder / "captions.srt").write_text(srt(chunks), encoding="utf-8")
+                (folder / "captions.srt").write_text(srt(chunks, speed=s.video_speed), encoding="utf-8")
                 title, description = final_title(script, s), final_description(script, set(), s)
                 meta = {"title": title, "description": description, "tags": script.tags, "category_id": "24",
                         "language": s.language, "source": "clip", "style": "clip", "clip_of": src,
                         "clip_start": round(plan.start, 2), "clip_end": round(plan.end, 2),
                         "score": plan.score, "review": [plan.reason] if plan.reason else [],
                         "duration": round(out["duration"], 2), "resolution": f"{s.width}x{s.height}",
+                        "video_speed": s.video_speed,
                         "llm": llm.label if llm else "offline", "created_at": now_iso()}
                 (folder / "metadata.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
                 rid = studio.history.add_video(
@@ -371,6 +382,7 @@ def make_clips(studio, src: str, *, count: int = 3, crop: str = "center", upload
                     description=description, tags=script.tags, folder=str(folder), video_path=str(video),
                     duration=out["duration"], llm=meta["llm"], voice="original audio", status="rendered",
                     score=plan.score)
+                usage.record_video(rid, title, video, out["duration"])
                 r = Result(True, title, folder, video, "rendered", seconds=time.time() - t0,
                            record_id=rid, score=plan.score, language=s.language)
                 log.info("Clip %d: %s (%.0fs from %s)", n, title, dur, _ts(plan.start))

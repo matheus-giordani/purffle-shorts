@@ -115,7 +115,8 @@ def _fake_anthropic(monkeypatch, captured):
             return reply
 
     class Client:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, max_retries=0):
+            assert max_retries == 0
             self.messages = Messages("messages")
             self.beta = types.SimpleNamespace(messages=Messages("beta"))
     mod.Anthropic = Client

@@ -74,7 +74,7 @@ def raise_for_status(resp: requests.Response, what: str) -> None:
 
 
 def download(url: str, dest: Path, *, headers: dict | None = None, timeout: int = 60,
-             max_bytes: int = 400 * 1024 * 1024) -> Path:
+             max_bytes: int = 400 * 1024 * 1024, attempts: int = 3) -> Path:
     """Stream ``url`` to ``dest`` atomically (via a .part file), with retries."""
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -95,7 +95,7 @@ def download(url: str, dest: Path, *, headers: dict | None = None, timeout: int 
         os.replace(tmp, dest)
         return dest
 
-    return with_retries(_do, attempts=3, label=f"download {dest.name}")
+    return with_retries(_do, attempts=attempts, label=f"download {dest.name}")
 
 
 _SECRET_RE = re.compile(r"(?i)\b((?:api_?)?key|token|access_token)=[^&\s'\"]+")

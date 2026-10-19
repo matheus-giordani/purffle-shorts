@@ -48,6 +48,8 @@ dependencies = [
     "anthropic>=1.0",
     # cryptography 49+ ships no Intel-Mac wheels, so pip would try to compile it with Rust.
     "cryptography<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "yt-dlp>=2026.8.19",
+    "faster-whisper>=1.2.1",
 ]
 
 [project.optional-dependencies]

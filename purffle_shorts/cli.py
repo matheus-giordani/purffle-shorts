@@ -64,6 +64,8 @@ def _common(p: argparse.ArgumentParser) -> None:
     r.add_argument("--aspect", choices=list(ASPECTS), help="9:16 Short/Reel, 16:9 YouTube, 1:1 or 4:5 feed")
     r.add_argument("--resolution", help="e.g. 1080x1920 or 720x1280")
     r.add_argument("--fps", type=int)
+    r.add_argument("--speed", dest="video_speed", type=float,
+                   help="final video speed, 0.5–2.0 (1 = normal; audio pitch is preserved)")
     r.add_argument("--encoder", dest="video_encoder", help="libx264|h264_videotoolbox|h264_nvenc|auto")
     r.add_argument("--no-music", action="store_true", help="skip background music")
     u = p.add_argument_group("publishing")
@@ -80,7 +82,7 @@ def build_settings(args: argparse.Namespace) -> Settings:
     ov = {k: getattr(args, k, None) for k in (
         "style", "language", "target_seconds", "llm_provider", "llm_model", "tts_engine", "tts_voice",
         "tts_voice_b", "caption_style", "caption_position", "color_grade", "transition", "fps", "video_encoder",
-        "privacy")}
+        "privacy", "video_speed")}
     if getattr(args, "niche", None):
         ov["niches"] = args.niche
     if getattr(args, "visuals", None):

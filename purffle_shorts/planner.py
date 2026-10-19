@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import random
 
+from . import usage
 from .config import Settings
 from .history import History
 from .script import LANGUAGES, STYLES
@@ -59,6 +60,14 @@ Prefer evergreen topics with real facts behind them. Return JSON: {{"ideas": [{{
 
 def plan_ideas(llm, settings: Settings, history: History, count: int = 10, niches: list[str] | None = None,
                insights: str = "") -> list[dict]:
+    with usage.operation(history, "planner", "; ".join(niches or settings.niches[:3])) as run:
+        saved = _plan_ideas(llm, settings, history, count, niches, insights)
+        run.safe(run.store.allocate_ideas, run.id, saved)
+        return saved
+
+
+def _plan_ideas(llm, settings: Settings, history: History, count: int, niches: list[str] | None,
+                insights: str) -> list[dict]:
     count = max(1, min(50, count))
     niches = niches or random.sample(settings.niches, min(3, len(settings.niches))) or ["interesting facts"]
     avoid = history.recent_titles(60) + [i["subject"] for i in history.ideas("pending")]

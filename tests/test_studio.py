@@ -84,6 +84,27 @@ def test_form_values_are_validated(server):
     assert s.music_volume == 0.0 and s.tts_engine == app.settings.tts_engine
 
 
+def test_final_speed_api_validation(server):
+    app, port = server
+    assert app.overrides({"speed": 1.5}).video_speed == 1.5
+    assert json.loads(req(port, "GET", "/api/info")[2])["speed"] == 1
+    for bad in (0, "NaN", 2.1, "fast"):
+        assert req(port, "POST", "/api/make", {"speed": bad}, app.token)[0] == 400
+        assert req(port, "POST", "/api/clip", {"source": "/tmp/video.mp4", "speed": bad}, app.token)[0] == 400
+
+
+def test_unavailable_accounting_preserves_studio(server, monkeypatch):
+    app, port = server
+
+    def broken(*a, **kw):
+        raise OSError("temporary telemetry failure")
+    monkeypatch.setattr(app.costs, "budgets", broken)
+    data = json.loads(req(port, "GET", "/api/info")[2])
+    assert "costs" in data and data["costs"]["error"]
+    assert req(port, "GET", "/api/costs")[0] == 503
+    assert req(port, "POST", "/api/draft", {"offline": True}, app.token)[0] == 200
+
+
 def test_offline_draft_job_runs_to_completion(server):
     app, port = server
     status, _, body = req(port, "POST", "/api/draft", {"offline": True, "style": "chat"}, app.token)
@@ -96,3 +117,51 @@ def test_offline_draft_job_runs_to_completion(server):
     assert job["status"] == "done", job
     assert job["result"]["script"]["style"] == "chat" and job["pct"] == 100
     assert job["label"] == "Demo video"
+    assert job["result"]["usage_run_id"]
+
+
+def test_costs_api_settings_filters_export_and_auth(server):
+    from purffle_shorts import usage
+    app, port = server
+    assert req(port, "GET", "/static/costs.js")[0] == 200
+    assert req(port, "POST", "/api/costs/settings", {"monthly_budget_usd": "1"})[0] == 403
+    status, _, body = req(port, "POST", "/api/costs/settings",
+                           {"monthly_budget_usd": "1", "brl_per_usd": "5.2"}, app.token)
+    assert status == 200 and json.loads(body)["monthly_budget_usd"] == "1.000000000"
+    with usage.operation(app.studio.history, "make", "tracked video"):
+        with usage.request("openrouter", "model") as call:
+            call.capture(data={"usage": {"cost": ".9"}})
+    summary = json.loads(req(port, "GET", "/api/costs")[2])
+    assert summary["totals"]["known_usd"] == "0.900000000" and summary["budgets"]["alerts"]
+    events = json.loads(req(port, "GET", "/api/costs/events?provider=openrouter")[2])
+    assert events["total"] == 1
+    assert req(port, "GET", "/api/costs?from=garbage")[0] == 400
+    assert req(port, "POST", "/api/costs/settings", {"brl_per_usd": "Infinity"}, app.token)[0] == 400
+    status, headers, csv = req(port, "GET", "/api/costs/export.csv")
+    assert status == 200 and "text/csv" in headers["Content-Type"] and b"0.900000000" in csv
+    assert req(port, "POST", "/api/costs/alerts", {"alerts": summary["budgets"]["alerts"]}, app.token)[0] == 200
+    assert not json.loads(req(port, "GET", "/api/costs")[2])["budgets"]["alerts"]
+    assert req(port, "POST", "/api/costs/sync", {}, app.token)[0] == 202
+    old = app.studio.history.add_video(title="legacy", status="rendered")
+    assert not json.loads(req(port, "GET", f"/api/videos/{old}/costs")[2])["tracked"]
+    assert req(port, "GET", "/api/videos/999999/costs")[0] == 404
+
+
+def test_make_now_keeps_idea_identity(server, monkeypatch):
+    from purffle_shorts.pipeline import Result, Studio
+    app, port = server
+    idea = app.studio.history.add_idea("Selected idea")
+    captured = []
+
+    def make(self, *args, **kwargs):
+        captured.append(kwargs)
+        return Result(True)
+    monkeypatch.setattr(Studio, "make", make)
+    _, _, body = req(port, "POST", "/api/make", {"idea_id": idea, "source": "queue"}, app.token)
+    jid = json.loads(body)["job"]
+    for _ in range(100):
+        if app.jobs[jid].finished:
+            break
+        time.sleep(.01)
+    assert captured[0]["idea_id"] == idea
+    assert app.studio.history.ideas()[0]["id"] == idea

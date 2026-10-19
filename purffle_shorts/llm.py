@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from . import usage
 from .config import Settings
 from .utils import PermanentError, http, raise_for_status, with_retries
 
@@ -192,21 +193,23 @@ class OpenAICompatible(Provider):
             headers["HTTP-Referer"] = "https://github.com/Chamanrajragu/purffle-shorts"
             headers["X-Title"] = "PurffleShorts"
         try:
-            r = http().post(f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=180)
-            raise_for_status(r, f"{self}")
+            with usage.request(self.name, self.model, free=self.preset.local) as call:
+                r = http().post(f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=180)
+                call.capture(r)
+                raise_for_status(r, f"{self}")
+                data = r.json()
+                try:
+                    content = data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, TypeError) as e:
+                    raise LLMError(f"{self}: unexpected response {str(data)[:200]}") from e
+                if not content:
+                    raise LLMError(f"{self}: empty reply (finish_reason={data['choices'][0].get('finish_reason')})")
+                return content
         except PermanentError as e:
             if "response_format" in payload and "response_format" in str(e):
-                self._json_mode = False  # endpoint doesn't support JSON mode; rely on prompt + parser
+                self._json_mode = False
                 return self.complete(system, user, schema=schema, temperature=temperature, max_tokens=max_tokens)
             raise
-        data = r.json()
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
-            raise LLMError(f"{self}: unexpected response {str(data)[:200]}") from e
-        if not content:
-            raise LLMError(f"{self}: empty reply (finish_reason={data['choices'][0].get('finish_reason')})")
-        return content
 
 
 class AnthropicProvider(Provider):
@@ -220,7 +223,9 @@ class AnthropicProvider(Provider):
         self.name, self.model, self.effort = "anthropic", model, effort
         self._anthropic = anthropic
         # With no explicit key the SDK resolves ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / `ant auth login`.
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        # The outer retry loop records every attempt; SDK retries would hide extra requests.
+        self.client = (anthropic.Anthropic(api_key=api_key, max_retries=0) if api_key
+                       else anthropic.Anthropic(max_retries=0))
 
     def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000) -> str:
         a = self._anthropic
@@ -238,22 +243,27 @@ class AnthropicProvider(Provider):
         if output_config:
             kwargs["output_config"] = output_config
         # Sampling params (temperature) are rejected by current Claude models, so none are sent.
-        try:
-            if _CLAUDE_FALLBACK_MODELS.match(self.model):
-                resp = self.client.beta.messages.create(
-                    betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
-            else:
-                resp = self.client.messages.create(**kwargs)
-        except (a.BadRequestError, a.AuthenticationError, a.PermissionDeniedError, a.NotFoundError) as e:
-            raise PermanentError(f"{self}: {e}") from e
-        except (a.RateLimitError, a.APIStatusError, a.APIConnectionError) as e:
-            raise LLMError(f"{self}: {e}") from e
-        if resp.stop_reason == "refusal":
-            raise PermanentError(f"{self}: request declined by the model")
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        if not text.strip():
-            raise LLMError(f"{self}: empty reply (stop_reason={resp.stop_reason})")
-        return text
+        with usage.request("anthropic", self.model) as call:
+            try:
+                if _CLAUDE_FALLBACK_MODELS.match(self.model):
+                    resp = self.client.beta.messages.create(
+                        betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kwargs)
+                else:
+                    resp = self.client.messages.create(**kwargs)
+            except (a.BadRequestError, a.AuthenticationError, a.PermissionDeniedError, a.NotFoundError) as e:
+                raise PermanentError(f"{self}: {e}") from e
+            except (a.RateLimitError, a.APIStatusError, a.APIConnectionError) as e:
+                raise LLMError(f"{self}: {e}") from e
+            details = getattr(resp, "usage", None)
+            details = details.model_dump() if hasattr(details, "model_dump") else vars(details) if details else {}
+            call.capture(data={"id": getattr(resp, "id", None), "model": getattr(resp, "model", self.model),
+                               "usage": details})
+            if resp.stop_reason == "refusal":
+                raise PermanentError(f"{self}: request declined by the model")
+            text = "".join(b.text for b in resp.content if b.type == "text")
+            if not text.strip():
+                raise LLMError(f"{self}: empty reply (stop_reason={resp.stop_reason})")
+            return text
 
 
 def build_provider(name: str, settings: Settings, model: str = "") -> Provider:
@@ -312,7 +322,11 @@ class LLM:
             def _call(p=p):
                 text = p.complete(system, user, schema=schema if schema is not None else {}, max_tokens=max_tokens,
                                   temperature=self.settings.llm_temperature)
-                return extract_json(text)
+                try:
+                    return extract_json(text)
+                except Exception as exc:
+                    usage.invalid_reply(exc)
+                    raise
             try:
                 result = with_retries(_call, attempts=2, base_delay=3, label=f"LLM {p}")
                 if p is not self.providers[0]:

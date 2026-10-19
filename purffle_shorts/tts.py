@@ -22,7 +22,7 @@ import wave
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import ffmpeg
+from . import ffmpeg, usage
 from .config import Settings
 from .timing import Word, estimate_timings, tokenize, transfer_timings
 from .utils import PermanentError, http, raise_for_status, with_retries
@@ -95,19 +95,20 @@ def _edge(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word], s
     path = out / "voice.mp3"
 
     def _do():
-        words: list[Word] = []
-        comm = edge_tts.Communicate(text, voice, rate=settings.tts_rate, boundary="WordBoundary",
-                                    receive_timeout=60)
-        with open(path, "wb") as f:
-            for chunk in comm.stream_sync():
-                if chunk["type"] == "audio":
-                    f.write(chunk["data"])
-                elif chunk["type"] == "WordBoundary":
-                    start = chunk["offset"] / 1e7
-                    words.append(Word(chunk["text"], start, start + chunk["duration"] / 1e7))
-        if path.stat().st_size == 0:
-            raise RuntimeError("edge-tts returned no audio")
-        return words
+        with usage.request("edge", voice, free=True, characters=len(text)):
+            words: list[Word] = []
+            comm = edge_tts.Communicate(text, voice, rate=settings.tts_rate, boundary="WordBoundary",
+                                        receive_timeout=60)
+            with open(path, "wb") as f:
+                for chunk in comm.stream_sync():
+                    if chunk["type"] == "audio":
+                        f.write(chunk["data"])
+                    elif chunk["type"] == "WordBoundary":
+                        start = chunk["offset"] / 1e7
+                        words.append(Word(chunk["text"], start, start + chunk["duration"] / 1e7))
+            if path.stat().st_size == 0:
+                raise RuntimeError("edge-tts returned no audio")
+            return words
 
     words = with_retries(_do, attempts=3, label=f"edge-tts {voice}")
     return path, words, voice
@@ -126,10 +127,12 @@ def _openai(text: str, out: Path, settings: Settings) -> tuple[Path, list[Word],
     path = out / "voice.mp3"
 
     def _do():
-        r = http().post("https://api.openai.com/v1/audio/speech", json=body, timeout=180,
-                        headers={"Authorization": f"Bearer {settings.openai_api_key}"})
-        raise_for_status(r, "OpenAI TTS")
-        path.write_bytes(r.content)
+        with usage.request("openai", model, characters=len(text)) as call:
+            r = http().post("https://api.openai.com/v1/audio/speech", json=body, timeout=180,
+                            headers={"Authorization": f"Bearer {settings.openai_api_key}"})
+            call.capture(r, {})
+            raise_for_status(r, "OpenAI TTS")
+            path.write_bytes(r.content)
 
     with_retries(_do, attempts=3, label="OpenAI TTS")
     return path, [], voice
@@ -141,16 +144,18 @@ def _openrouter(text: str, out: Path, settings: Settings) -> tuple[Path, list[Wo
     model = settings.tts_model or "google/gemini-3.8-flash-tts"
     voice = _pick_voice(settings, "Kore")
     path = out / "voice.mp3"
-    r = http().post("https://openrouter.ai/api/v1/audio/speech", timeout=180,
-                    headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
-                             "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts",
-                             "X-Title": "PurffleShorts"},
-                    json={"model": model, "input": text, "voice": voice,
-                          "instructions": settings.tts_instructions, "response_format": "mp3"})
-    raise_for_status(r, "OpenRouter TTS")
-    if not r.content:
-        raise RuntimeError("OpenRouter TTS returned empty audio")
-    path.write_bytes(r.content)
+    with usage.request("openrouter", model, characters=len(text)) as call:
+        r = http().post("https://openrouter.ai/api/v1/audio/speech", timeout=180,
+                        headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
+                                 "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts",
+                                 "X-Title": "PurffleShorts"},
+                        json={"model": model, "input": text, "voice": voice,
+                              "instructions": settings.tts_instructions, "response_format": "mp3"})
+        call.capture(r, {})
+        raise_for_status(r, "OpenRouter TTS")
+        if not r.content:
+            raise RuntimeError("OpenRouter TTS returned empty audio")
+        path.write_bytes(r.content)
     return path, [], voice
 
 
@@ -163,11 +168,13 @@ def _elevenlabs(text: str, out: Path, settings: Settings) -> tuple[Path, list[Wo
     path = out / "voice.mp3"
 
     def _do():
-        r = http().post(url, timeout=180, headers={"xi-api-key": settings.elevenlabs_api_key},
-                        json={"text": text, "model_id": model,
-                              "voice_settings": {"stability": 0.45, "similarity_boost": 0.8, "style": 0.3}})
-        raise_for_status(r, "ElevenLabs TTS")
-        return r.json()
+        with usage.request("elevenlabs", model, characters=len(text)) as call:
+            r = http().post(url, timeout=180, headers={"xi-api-key": settings.elevenlabs_api_key},
+                            json={"text": text, "model_id": model,
+                                  "voice_settings": {"stability": 0.45, "similarity_boost": 0.8, "style": 0.3}})
+            call.capture(r)
+            raise_for_status(r, "ElevenLabs TTS")
+            return r.json()
 
     data = with_retries(_do, attempts=3, label="ElevenLabs TTS")
     path.write_bytes(base64.b64decode(data["audio_base64"]))
@@ -277,7 +284,7 @@ _ENGINE_FUNCS = {"edge": _edge, "openai": _openai, "openrouter": _openrouter,
 # ------------------------------------------------------------------------------------------ aligners
 def _align_faster_whisper(audio: Path, language: str) -> list[Word]:
     from faster_whisper import WhisperModel  # optional dependency
-    with _model_lock:
+    with usage.request("local", "faster-whisper/base", free=True, audio_seconds=ffmpeg.duration(audio)), _model_lock:
         model = _model_cache.get("whisper")
         if model is None:
             model = _model_cache["whisper"] = WhisperModel("base", device="auto", compute_type="int8")
@@ -286,17 +293,19 @@ def _align_faster_whisper(audio: Path, language: str) -> list[Word]:
 
 
 def _align_openai(audio: Path, language: str, api_key: str) -> list[Word]:
-    with open(audio, "rb") as f:
+    with usage.request("openai", "whisper-1", audio_seconds=ffmpeg.duration(audio)) as call, open(audio, "rb") as f:
         r = http().post(
             "https://api.openai.com/v1/audio/transcriptions",
             headers={"Authorization": f"Bearer {api_key}"},
             data={"model": "whisper-1", "response_format": "verbose_json", "language": language,
                   "timestamp_granularities[]": "word"},
             files={"file": (audio.name, f)}, timeout=180)
-    raise_for_status(r, "OpenAI alignment")
-    return [Word(w["word"], float(w["start"]), float(w["end"])) for w in r.json().get("words", [])]
+        call.capture(r)
+        raise_for_status(r, "OpenAI alignment")
+        return [Word(w["word"], float(w["start"]), float(w["end"])) for w in r.json().get("words", [])]
 
 
+@usage.stage("alignment", shared=False)
 def _align(audio: Path, settings: Settings) -> tuple[list[Word], str]:
     mode = settings.align
     if mode == "none":
@@ -322,10 +331,21 @@ def synthesize(text: str, out_dir: Path, settings: Settings) -> Speech:
     """Speak ``text`` and return audio + one timed Word per script token."""
     engine = settings.tts_engine if settings.tts_engine in _ENGINE_FUNCS else "edge"
     out_dir.mkdir(parents=True, exist_ok=True)
-    audio, native, voice = _ENGINE_FUNCS[engine](text, out_dir, settings)
-    dur = ffmpeg.duration(audio)
+    if engine in ("edge", "openai", "openrouter", "elevenlabs"):
+        audio, native, voice = _ENGINE_FUNCS[engine](text, out_dir, settings)
+        dur = ffmpeg.duration(audio)
+        if dur > 0:
+            usage.last_units(audio_seconds=dur)
+    else:
+        with usage.request(engine, settings.tts_model or engine, free=True, characters=len(text)) as call:
+            audio, native, voice = _ENGINE_FUNCS[engine](text, out_dir, settings)
+            dur = ffmpeg.duration(audio)
+            if dur > 0:
+                call.add_units(audio_seconds=dur)
     if dur <= 0:
-        raise RuntimeError(f"{engine} produced unreadable audio: {audio}")
+        error = RuntimeError(f"{engine} produced unreadable audio: {audio}")
+        usage.invalid_reply(error)
+        raise error
     tokens = tokenize(text, settings.language)
     if native:
         words, timing = transfer_timings(tokens, native, dur), "native"
@@ -364,7 +384,8 @@ def synthesize_lines(lines: list[tuple[str, str]], out_dir: Path, settings: Sett
 
     workers = 4 if settings.tts_engine in ("edge", "openai", "openrouter", "elevenlabs") else 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-        parts = list(ex.map(lambda a: one(*a), [(i, sp, t) for i, (sp, t) in enumerate(lines)]))
+        futures = [usage.submit(ex, one, i, sp, t) for i, (sp, t) in enumerate(lines)]
+        parts = [future.result() for future in futures]
 
     # Normalise every line to the same PCM format and join them with a short pause in between.
     gap = out_dir / "gap.wav"

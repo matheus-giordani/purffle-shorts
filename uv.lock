@@ -4635,6 +4635,7 @@ dependencies = [
     { name = "anthropic" },
     { name = "cryptography", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "edge-tts" },
+    { name = "faster-whisper" },
     { name = "google-api-python-client" },
     { name = "google-auth" },
     { name = "google-auth-oauthlib" },
@@ -4644,6 +4645,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "requests" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "yt-dlp" },
 ]
 
 [package.optional-dependencies]
@@ -4672,6 +4674,7 @@ requires-dist = [
     { name = "coqui-tts", marker = "extra == 'coqui'", specifier = ">=0.24" },
     { name = "cryptography", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = "<49" },
     { name = "edge-tts", specifier = ">=7.0" },
+    { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "faster-whisper", marker = "extra == 'clip'", specifier = ">=1.0" },
     { name = "faster-whisper", marker = "extra == 'whisper'", specifier = ">=1.0" },
     { name = "google-api-python-client", specifier = ">=2.100" },
@@ -4686,6 +4689,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "soundfile", marker = "extra == 'kokoro'", specifier = ">=0.12" },
     { name = "tzdata", marker = "sys_platform == 'win32'" },
+    { name = "yt-dlp", specifier = ">=2026.8.19" },
     { name = "yt-dlp", marker = "extra == 'clip'", specifier = ">=2025.1" },
 ]
 provides-extras = ["whisper", "clip", "kokoro", "coqui", "dev"]

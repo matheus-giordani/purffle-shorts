@@ -427,13 +427,15 @@ def from_document(path: str | Path) -> Topic:
 
 
 def pick_topic(settings: Settings, history: History, explicit: str | None = None,
-               source: str | None = None) -> Topic:
-    if explicit:
+               source: str | None = None, idea_id: int | None = None) -> Topic:
+    if explicit and idea_id is None:
         return Topic(explicit, "manual")
-    if settings.offline:
+    if settings.offline and idea_id is None:
         return Topic("octopus superpowers", "manual")
-    if source in (None, "queue"):
-        idea = history.claim_idea()
+    if source in (None, "queue") or idea_id is not None:
+        idea = history.claim_idea(idea_id)
+        if idea_id is not None and not idea:
+            raise ValueError("That idea is no longer pending")
         if idea:
             subj = (idea.get("subject") or "").strip()
             if re.match(r"^https?://", subj, re.I):

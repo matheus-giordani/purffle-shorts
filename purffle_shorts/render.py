@@ -223,7 +223,9 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
     if plan.mode == "ass" and plan.ass:
         f.append(f"[{last}]ass={plan.ass.name}:fontsdir={plan.fonts_dir.name if plan.fonts_dir else '.'}[vass]")
         last = "vass"
-    f.append(f"[{last}]format=yuv420p[vout]")
+    speed = settings.video_speed
+    retime = f",setpts=(PTS-STARTPTS)/{speed:.8f}" if speed != 1 else ""
+    f.append(f"[{last}]format=yuv420p{retime}[vout]")
 
     # Audio: voice (+ music ducked under it) -> loudness normalised.
     f.append(f"[{voice_i}:a]aresample=48000,aformat=channel_layouts=stereo,apad=whole_dur={total:.3f}[v0]")
@@ -239,12 +241,13 @@ def compose(settings: Settings, segments: list[Path], lengths: list[float], voic
             f.append("[v0][mus]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mix]")
     else:
         f.append("[v0]anull[mix]")
-    f.append(f"[mix]loudnorm=I={settings.loudness_lufs}:TP=-1.5:LRA=11,aresample=48000[aout]")
+    audio_speed = f",atempo={speed:.8f}" if speed != 1 else ""
+    f.append(f"[mix]loudnorm=I={settings.loudness_lufs}:TP=-1.5:LRA=11,aresample=48000{audio_speed}[aout]")
 
     def args(encode: list[str]) -> list[str]:
         return [*inputs, "-filter_complex", ";".join(f), "-map", "[vout]", "-map", "[aout]",
                 *encode, "-r", str(F), "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-                "-t", f"{total:.3f}", "-movflags", "+faststart", str(out.resolve())]
+                "-t", f"{total / speed:.3f}", "-movflags", "+faststart", str(out.resolve())]
     encode = _encode_args(settings, final=True)
     try:
         ffmpeg.run(args(encode), label="final render", cwd=work)

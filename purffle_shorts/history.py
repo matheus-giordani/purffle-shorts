@@ -53,7 +53,13 @@ class History:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         with self._db() as c:
+            from .usage import SCHEMA as USAGE_SCHEMA
             c.executescript(SCHEMA)
+            c.executescript(USAGE_SCHEMA)
+            c.execute("BEGIN IMMEDIATE")
+            usage_columns = {r["name"] for r in c.execute("PRAGMA table_info(usage_runs)")}
+            if "owner_pid" not in usage_columns:
+                c.execute("ALTER TABLE usage_runs ADD COLUMN owner_pid INTEGER")
             have = {r["name"] for r in c.execute("PRAGMA table_info(videos)")}
             for col, kind in VIDEO_COLUMNS.items():
                 if col not in have:
@@ -152,10 +158,13 @@ class History:
             return self._all("SELECT * FROM ideas WHERE status = ? ORDER BY id LIMIT ?", (status, limit))
         return self._all("SELECT * FROM ideas ORDER BY id DESC LIMIT ?", (limit,))
 
-    def claim_idea(self) -> dict | None:
+    def claim_idea(self, idea_id: int | None = None) -> dict | None:
         """Take the oldest pending idea (atomically, so parallel workers never get the same one)."""
         with self._db() as c:
-            row = c.execute("SELECT * FROM ideas WHERE status = 'pending' ORDER BY id LIMIT 1").fetchone()
+            c.execute("BEGIN IMMEDIATE")
+            row = c.execute("SELECT * FROM ideas WHERE status = 'pending'"
+                            + (" AND id = ?" if idea_id is not None else "") + " ORDER BY id LIMIT 1",
+                            (idea_id,) if idea_id is not None else ()).fetchone()
             if not row:
                 return None
             c.execute("UPDATE ideas SET status = 'used', used_at = ? WHERE id = ?", (now_iso(), row["id"]))

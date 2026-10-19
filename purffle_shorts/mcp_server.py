@@ -42,6 +42,9 @@ TOOLS: list[dict] = [
          "style": _STYLE,
          "language": {"type": "string", "description": "Language code, e.g. en, es, hi, ta, fr, ja."},
          "duration_seconds": {"type": "integer", "minimum": 10, "maximum": 170},
+         "speed": {"type": "number", "minimum": 0.5, "maximum": 2,
+                   "description": "Final export speed, including audio and captions. Default 1."},
+         "usage_run_id": {"type": "string", "description": "Link the usage_run_id returned by draft_script."},
          "aspect": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]},
          "script": {"type": "object", "description": "A script from draft_script (optionally edited) to render "
                                                      "exactly, instead of writing a new one."},
@@ -60,7 +63,8 @@ TOOLS: list[dict] = [
                     "of its best moments, with captions. Only for videos the user owns or may reuse.",
      "inputSchema": {"type": "object", "required": ["source"], "properties": {
          "source": {"type": "string"}, "count": {"type": "integer", "minimum": 1, "maximum": 10},
-         "crop": {"type": "string", "enum": ["center", "blur"]}, "upload": {"type": "boolean"}}}},
+         "crop": {"type": "string", "enum": ["center", "blur"]}, "upload": {"type": "boolean"},
+         "speed": {"type": "number", "minimum": 0.5, "maximum": 2}}}},
     {"name": "plan_ideas",
      "description": "Brainstorm specific video ideas and add them to the idea queue that the autopilot uses first.",
      "inputSchema": {"type": "object", "properties": {
@@ -83,7 +87,8 @@ class Server:
         from .config import aspect_resolution
         s = self.settings.with_overrides(
             style=a.get("style") or None, language=(a.get("language") or "").lower() or None,
-            target_seconds=max(10, min(170, int(a["duration_seconds"]))) if a.get("duration_seconds") else None)
+            target_seconds=max(10, min(170, int(a["duration_seconds"]))) if a.get("duration_seconds") else None,
+            video_speed=a.get("speed"))
         if a.get("aspect") and aspect_resolution(a["aspect"]):
             s = replace(s, resolution=aspect_resolution(a["aspect"]))
         if a.get("demo"):
@@ -97,6 +102,7 @@ class Server:
         studio = Studio(s)
         script = script_from_data(a["script"], s) if isinstance(a.get("script"), dict) else None
         r = studio.make(a.get("topic") or None, url=a.get("url") or None, script=script,
+                        usage_run_id=a.get("usage_run_id") or (a.get("script") or {}).get("usage_run_id"),
                         style=s.style if s.style in STYLES else None,
                         upload=bool(a.get("upload")) and not s.offline, languages=a.get("also_languages") or [])
         if not r.ok:
@@ -107,12 +113,13 @@ class Server:
     def draft_script(self, a: dict) -> str:
         from .pipeline import Studio
         script, pick, writer = Studio(self._settings(a)).draft(a.get("topic") or None, url=a.get("url") or None)
-        return json.dumps(script.to_dict(), indent=2, ensure_ascii=False)
+        return json.dumps({**script.to_dict(), "usage_run_id": getattr(script, "_usage_run_id", "")},
+                          indent=2, ensure_ascii=False)
 
     def clip_video(self, a: dict) -> str:
         from .clipper import make_clips
         from .pipeline import Studio
-        results = make_clips(Studio(self.settings), a["source"], count=int(a.get("count") or 3),
+        results = make_clips(Studio(self._settings(a)), a["source"], count=int(a.get("count") or 3),
                              crop=a.get("crop") or "center", upload=bool(a.get("upload")))
         return "\n\n".join(_describe(r) for r in results) or "No clips were made."
 
