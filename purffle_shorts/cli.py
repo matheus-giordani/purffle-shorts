@@ -139,7 +139,8 @@ def print_result(r) -> None:
         return
     score = f"\n  retention score: {r.score}/100" if r.score is not None else ""
     print(f"\n✔ {r.title}\n  folder: {r.folder}\n  status: {r.status}{score}"
-          + (f"\n  https://youtube.com/shorts/{r.youtube_id}" if r.youtube_id else ""))
+          + (f"\n  https://youtube.com/shorts/{r.youtube_id}" if r.youtube_id else "")
+          + (f"\n  publication: {r.error}" if r.error else ""))
 
 
 def cmd_demo(args, s: Settings) -> int:
@@ -157,6 +158,14 @@ def cmd_demo(args, s: Settings) -> int:
 def cmd_upload(args, s: Settings) -> int:
     from .pipeline import Studio
     studio = Studio(s)
+    if getattr(args, "link_youtube_id", None) or getattr(args, "confirm_not_uploaded", False):
+        if not args.id or args.pending:
+            print("Use --id N to resolve one upload after checking your YouTube channel.")
+            return 2
+        status = studio.history.resolve_upload(args.id, youtube_id=args.link_youtube_id or "",
+                                               not_uploaded=args.confirm_not_uploaded)
+        print(f"Upload resolved: {status}. No upload was started.")
+        return 0
     if args.pending:
         n = studio.flush_queue(include_rendered=True)
         print(f"Uploaded {n} video(s). Remaining today: {max(0, studio.quota_left())}")
@@ -374,6 +383,11 @@ def build_parser() -> argparse.ArgumentParser:
     _common(up)
     up.add_argument("--pending", action="store_true", help="upload everything not yet on YouTube")
     up.add_argument("--id", type=int, help="upload one video by history id")
+    resolution = up.add_mutually_exclusive_group()
+    resolution.add_argument("--link-youtube-id", metavar="VIDEO_ID",
+                            help="after checking YouTube, link an uncertain upload to its existing remote video")
+    resolution.add_argument("--confirm-not-uploaded", action="store_true",
+                            help="after checking YouTube, clear an uncertain attempt; does not start another upload")
     up.set_defaults(func=cmd_upload)
 
     for name, func, helptext in [("auth", cmd_auth, "connect your YouTube channel (OAuth)"),

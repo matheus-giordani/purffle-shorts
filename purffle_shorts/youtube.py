@@ -33,6 +33,10 @@ class NotAuthorized(RuntimeError):
     pass
 
 
+class NoPublishSlot(RuntimeError):
+    pass
+
+
 def scopes_for(settings: Settings) -> list[str]:
     return [SCOPE_UPLOAD] + ([SCOPE_MANAGE] if settings.playlist_id else [])
 
@@ -119,8 +123,8 @@ def next_publish_slot(settings: Settings, taken: list[str], now: datetime | None
         try:
             hh, mm = (int(x) for x in t.split(":"))
             slots.append(dtime(hh, mm))
-        except ValueError:
-            log.warning("Ignoring bad PUBLISH_TIMES entry %r (use HH:MM)", t)
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError(f"Invalid PUBLISH_TIMES entry {t!r}; use HH:MM (00:00–23:59)") from None
     taken_set = {x for x in taken if x}
     for day in range(0, 60):
         date = (now + timedelta(days=day)).date()
@@ -131,7 +135,7 @@ def next_publish_slot(settings: Settings, taken: list[str], now: datetime | None
             iso = to_rfc3339(cand)
             if iso not in taken_set:
                 return cand
-    return None
+    raise NoPublishSlot("No free publication slot in the next 60 days; update PUBLISH_TIMES or the schedule")
 
 
 def to_rfc3339(dt: datetime) -> str:
@@ -140,6 +144,8 @@ def to_rfc3339(dt: datetime) -> str:
 
 def build_body(settings: Settings, title: str, description: str, tags: list[str], category_id: str,
                language: str, publish_at: datetime | None = None) -> dict:
+    if len(description.encode("utf-8")) > 5000:
+        raise ValueError("YouTube descriptions must fit in 5000 UTF-8 bytes. Shorten the text or links; nothing was uploaded.")
     status = {
         "privacyStatus": "private" if publish_at else settings.privacy,
         "selfDeclaredMadeForKids": settings.made_for_kids,
@@ -152,7 +158,7 @@ def build_body(settings: Settings, title: str, description: str, tags: list[str]
     return {
         "snippet": {
             "title": title[:100],
-            "description": description[:4900],
+            "description": description,
             "tags": tags,
             "categoryId": category_id,
             "defaultLanguage": language,

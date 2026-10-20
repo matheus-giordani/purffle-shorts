@@ -22,7 +22,7 @@ from .utils import http, raise_for_status, redact
 
 log = logging.getLogger("purffle")
 NANO = 1_000_000_000
-SHARED_STAGES = {"planner", "script", "review", "footage", "image", "video", "transcription", "clip"}
+SHARED_STAGES = {"planner", "script", "review", "footage", "image", "video", "transcription", "clip", "product-analysis"}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS usage_runs (
     id TEXT PRIMARY KEY, parent_id TEXT, source_run_id TEXT, source_video_id INTEGER, idea_id INTEGER,
@@ -52,6 +52,9 @@ CREATE TABLE IF NOT EXISTS usage_allocations (
     id INTEGER PRIMARY KEY, event_id TEXT NOT NULL, target_type TEXT NOT NULL, target_id INTEGER NOT NULL,
     title TEXT NOT NULL, numerator INTEGER NOT NULL, denominator INTEGER NOT NULL,
     shared INTEGER NOT NULL, UNIQUE(event_id, target_type, target_id)
+);
+CREATE TABLE IF NOT EXISTS usage_run_products (
+    run_id TEXT NOT NULL, product_id INTEGER NOT NULL, PRIMARY KEY(run_id, product_id)
 );
 CREATE TABLE IF NOT EXISTS cost_settings (
     id INTEGER PRIMARY KEY CHECK(id = 1), value TEXT NOT NULL
@@ -223,11 +226,43 @@ class Store:
                             (share["event_id"], "video", video_id, title, share["numerator"],
                              share["denominator"] * len(shared_targets)))
                     db.execute("DELETE FROM usage_allocations WHERE id = ?", (share["id"],))
+            product_ids = [r[0] for r in db.execute(
+                "SELECT product_id FROM usage_run_products WHERE run_id=? OR run_id=?",
+                (run_id, run["source_run_id"]))]
+            if product_ids:
+                marks = ",".join("?" for _ in product_ids)
+                shares = db.execute("SELECT * FROM usage_allocations WHERE target_type='product' "
+                                    f"AND target_id IN ({marks})", product_ids).fetchall()
+                # Several selected products can carry fractions of the same research call.
+                by_event: dict[str, Fraction] = {}
+                for share in shares:
+                    by_event[share["event_id"]] = by_event.get(share["event_id"], Fraction()) + Fraction(
+                        share["numerator"], share["denominator"])
+                for event_id, fraction in by_event.items():
+                    for _, video_id, title in shared_targets:
+                        previous = db.execute("SELECT numerator,denominator FROM usage_allocations "
+                                              "WHERE event_id=? AND target_type='video' AND target_id=?",
+                                              (event_id, video_id)).fetchone()
+                        assigned = fraction / len(shared_targets)
+                        if previous:
+                            assigned += Fraction(previous["numerator"], previous["denominator"])
+                        db.execute("INSERT INTO usage_allocations "
+                                   "(event_id,target_type,target_id,title,numerator,denominator,shared) "
+                                   "VALUES (?,'video',?,?,?,?,1) ON CONFLICT(event_id,target_type,target_id) "
+                                   "DO UPDATE SET numerator=excluded.numerator,denominator=excluded.denominator,shared=1",
+                                   (event_id, video_id, title, assigned.numerator, assigned.denominator))
+                for share in shares:
+                    db.execute("DELETE FROM usage_allocations WHERE id=?", (share["id"],))
 
     def allocate_ideas(self, run_id: str, ideas: list[dict]) -> None:
         with self.history._db() as db:
             events = db.execute("SELECT id FROM usage_events WHERE run_id = ?", (run_id,)).fetchall()
             self.allocate(db, events, [("idea", i["id"], i["subject"]) for i in ideas], True)
+
+    def allocate_products(self, run_id: str, products: list[dict]) -> None:
+        with self.history._db() as db:
+            events = db.execute("SELECT id FROM usage_events WHERE run_id=?", (run_id,)).fetchall()
+            self.allocate(db, events, [("product", p["id"], p["title"]) for p in products], True)
 
     def splits(self, events: list[dict]) -> dict[str, list[dict]]:
         """Largest-remainder allocation preserves every nanodollar, including delayed charges."""
@@ -410,6 +445,16 @@ def annotate(**fields):
         ctx.run.safe(ctx.run.store.history._exec,
                      "UPDATE usage_runs SET " + ",".join(f"{k}=?" for k in fields) + " WHERE id=?",
                      (*fields.values(), ctx.run.id))
+
+
+def use_products(product_ids: list[int]):
+    ctx = _context.get()
+    if ctx and product_ids:
+        def save():
+            with ctx.run.store.history._db() as db:
+                db.executemany("INSERT OR IGNORE INTO usage_run_products (run_id,product_id) VALUES (?,?)",
+                               [(ctx.run.id, pid) for pid in set(product_ids)])
+        ctx.run.safe(save)
 
 
 def step(name: str):

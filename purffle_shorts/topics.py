@@ -47,6 +47,9 @@ class Topic:
     style: str = ""
     idea_id: int | None = None
     images: list[str] = field(default_factory=list)
+    videos: list[str] = field(default_factory=list)
+    product_links: list[str] = field(default_factory=list)
+    product_ids: list[int] = field(default_factory=list)
 
 
 def _weighted_sources(settings: Settings) -> list[tuple[str, float]]:
@@ -405,7 +408,13 @@ def from_url(url: str) -> Topic:
     prod = extract_product(r.text, url)
     if prod and len(prod[1]) >= 40:
         subj, ctx, imgs = prod
-        return Topic(subj or url, "url", key=f"url:{url}", context=ctx[:6000], style="product", images=imgs[:8])
+        vids = [ html.unescape(m.group(0)) for m in re.finditer(
+            r'https?://[^\s"\'<>\\]+\.(?:mp4|webm)(?:\?[^\s"\'<>\\]*)?', r.text.replace(r"\/", "/"), re.I
+        )]
+        vids = list(dict.fromkeys(vids))[:4]
+        links = [f"{subj or 'Produto'}: {url}"]
+        return Topic(subj or url, "url", key=f"url:{url}", context=ctx[:6000], style="product",
+                     images=imgs[:8], videos=vids, product_links=links)
     title, text = extract_article(r.text)
     if len(text) < 200:
         raise ValueError(f"{url}: couldn't find readable article text on that page")
@@ -437,18 +446,34 @@ def pick_topic(settings: Settings, history: History, explicit: str | None = None
         if idea_id is not None and not idea:
             raise ValueError("That idea is no longer pending")
         if idea:
-            subj = (idea.get("subject") or "").strip()
-            if re.match(r"^https?://", subj, re.I):
-                t = from_url(subj)
-                t.key = f'idea:{idea["id"]}'
-                t.idea_id = idea["id"]
-                if idea.get("style"):
-                    t.style = idea["style"]
-                return t
-            angle = (idea.get("notes") or "").strip()
-            subject = f'{subj} (angle: {angle})' if angle else subj
-            return Topic(subject, "idea", key=f'idea:{idea["id"]}', style=idea.get("style") or "",
-                         idea_id=idea["id"])
+            try:
+                subj = (idea.get("subject") or "").strip()
+                notes = (idea.get("notes") or "").strip()
+                m_pids = re.match(r"^products:([\d,\s]+)$", notes)
+                if m_pids:
+                    from .products import build_product_topic
+                    pids = [int(x) for x in re.findall(r"\d+", m_pids.group(1))]
+                    prods = history.get_products(pids)
+                    if not prods:
+                        raise ValueError("The products attached to this idea are no longer available")
+                    t = build_product_topic(prods)
+                    t.key = f'idea:{idea["id"]}'
+                    t.idea_id = idea["id"]
+                    t.product_ids = pids
+                    return t
+                if re.match(r"^https?://", subj, re.I):
+                    t = from_url(subj)
+                    t.key = f'idea:{idea["id"]}'
+                    t.idea_id = idea["id"]
+                    if idea.get("style"):
+                        t.style = idea["style"]
+                    return t
+                subject = f'{subj} (angle: {notes})' if notes else subj
+                return Topic(subject, "idea", key=f'idea:{idea["id"]}', style=idea.get("style") or "",
+                             idea_id=idea["id"])
+            except BaseException:
+                history.release_idea(idea["id"])
+                raise
         if source == "queue":
             log.info("The idea queue is empty; using a niche topic")
             return from_niche(settings)

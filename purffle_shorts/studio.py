@@ -86,8 +86,10 @@ class StudioServer:
     def __init__(self, settings: Settings):
         from .costs import Costs
         from .pipeline import Studio
+        from .products import DEFAULT_STORES
         self.settings = settings
         self.studio = Studio(settings)
+        self.studio.history.ensure_default_stores(DEFAULT_STORES)
         self.costs = Costs(self.studio.history, settings)
         self._cost_sync_lock = threading.Lock()
         self.cost_sync = {"running": False, "updated": 0, "error": "", "checked_at": 0}
@@ -182,8 +184,9 @@ class StudioServer:
             try:
                 if job.kind == "upload":
                     status = self.studio.upload_record(int(p["id"]))
-                    job.result = {"status": status, "id": int(p["id"])}
-                    ok = status in ("uploaded", "scheduled", "queued")
+                    rec = self.studio.history.get(int(p["id"])) or {}
+                    job.result = {"status": status, "id": int(p["id"]), "error": rec.get("error") or ""}
+                    ok = status in ("uploaded", "scheduled", "queued", "uploading")
                 elif job.kind == "stats":
                     from .analytics import sync_stats
                     job.result = {"updated": sync_stats(self.settings, self.studio.history)}
@@ -224,12 +227,35 @@ class StudioServer:
 
     def _run(self, job: Job, studio, s: Settings, p: dict) -> bool:
         from .script import script_from_data
+        raw_pids = p.get("product_ids") or []
+        pids = [int(x) for x in raw_pids if str(x).isdigit()] if isinstance(raw_pids, list) else []
+        raw_links = p.get("product_links") or []
+        if isinstance(raw_links, str):
+            raw_links = [ln.strip() for ln in raw_links.splitlines() if ln.strip()]
+        plinks = [str(ln).strip() for ln in raw_links if str(ln).strip()][:12]
+        if job.kind == "scout":
+            from .products import run_scout
+            items = run_scout(
+                studio.history, s, studio.llm_for_stage("planner"),
+                mode=str(p.get("mode") or "stores"),
+                store_id=int(p["store_id"]) if str(p.get("store_id") or "").isdigit() else None,
+                query=str(p.get("query") or "").strip()[:120],
+                platform=_choice(p.get("platform"), ("shopify", "nuvemshop", "woocommerce"), ""),
+                url=str(p.get("url") or "").strip()[:400],
+                limit=max(1, min(24, int(p.get("limit") or 8))),
+                progress=self._progress(job),
+            )
+            job.result = {"products": len(items), "ids": [it["id"] for it in items]}
+            return True
         if job.kind == "draft":
             script, pick, writer = studio.draft(p.get("topic") or None, source=p.get("source") or None,
                                                 style=s.style if s.style != "auto" else None,
                                                 url=p.get("url") or None,
-                                                idea_id=int(p["idea_id"]) if p.get("idea_id") else None)
+                                                idea_id=int(p["idea_id"]) if p.get("idea_id") else None,
+                                                product_ids=pids or None,
+                                                product_links=plinks or None)
             job.result = {"script": script.to_dict(), "source": pick.source, "llm": writer,
+                          "product_ids": pick.product_ids, "images": pick.images, "videos": pick.videos,
                           "usage_run_id": getattr(script, "_usage_run_id", "")}
             job.stage, job.pct = "done", 100
             return True
@@ -252,12 +278,16 @@ class StudioServer:
         langs = p.get("also_langs")
         if isinstance(langs, str):
             langs = [x.strip().lower() for x in langs.split(",") if x.strip()]
+        ext_imgs = [str(u).strip() for u in (p.get("images") or []) if str(u).strip()][:12] if isinstance(p.get("images"), list) else None
+        ext_vids = [str(u).strip() for u in (p.get("videos") or []) if str(u).strip()][:6] if isinstance(p.get("videos"), list) else None
         r = studio.make(p.get("topic") or None, source=p.get("source") or None, upload=bool(p.get("upload")),
                         style=s.style if s.style != "auto" else None, script=script, url=p.get("url") or None,
                         languages=[str(x)[:8] for x in (langs or [])][:6],
                         idea_id=int(p["idea_id"]) if p.get("idea_id") else None,
                         usage_run_id=str(p.get("usage_run_id") or "")[:32] or None,
-                        source_video_id=int(p["source_video_id"]) if p.get("source_video_id") else None)
+                        source_video_id=int(p["source_video_id"]) if p.get("source_video_id") else None,
+                        product_ids=pids or None, product_links=plinks or None,
+                        extra_images=ext_imgs, extra_videos=ext_vids)
         job.result = _result(r)
         return r.ok
 
@@ -283,11 +313,13 @@ class StudioServer:
         return out
 
     def video(self, vid: int) -> dict | None:
+        attempt = self.studio.history.upload_attempt(vid)
         rec = self.studio.history.get(vid)
         if not rec:
             return None
         folder = Path(rec["folder"]) if rec["folder"] else None
         data = dict(rec)
+        data["upload_state"] = attempt["state"] if attempt else None
         data["tags"] = json.loads(rec["tags"] or "[]")
         for name in ("metadata", "script"):
             f = folder / f"{name}.json" if folder else None
@@ -351,7 +383,8 @@ class StudioServer:
                                                           f"{s.width}x{s.height}"),
                 "also_languages": s.also_languages, "learn_from_stats": s.learn_from_stats,
                 "counts": stats, "total": sum(stats.values()), "views": views,
-                "ideas": len(h.ideas("pending")), "channel": s.channel_name, "costs": budget_state}
+                "ideas": len(h.ideas("pending")), "products": len(h.list_products(limit=500)),
+                "channel": s.channel_name, "costs": budget_state}
 
     def options(self) -> dict:
         from .llm import PRESETS, available_providers
@@ -430,7 +463,7 @@ def _handler(app: StudioServer, bound_host: str):
                 html = (WEB / "index.html").read_text(encoding="utf-8")
                 html = html.replace("__TOKEN__", app.token).replace("__VERSION__", __version__)
                 return self._send(200, html.encode(), "text/html; charset=utf-8", {
-                    "Content-Security-Policy": "default-src 'self'; img-src 'self' data: https://i.ytimg.com; "
+                    "Content-Security-Policy": "default-src 'self'; img-src 'self' data: https:; "
                                                "media-src 'self'; connect-src 'self'; frame-ancestors 'none'",
                     "X-Frame-Options": "DENY"})
             m = re.fullmatch(r"/static/([\w.-]+)", path)
@@ -480,6 +513,19 @@ def _handler(app: StudioServer, bound_host: str):
             if path == "/api/ideas":
                 return self._json({"pending": app.studio.history.ideas("pending"),
                                    "used": app.studio.history.ideas("used", 30)})
+            if path == "/api/products":
+                from .products import DEFAULT_STORES
+                h = app.studio.history
+                h.ensure_default_stores(DEFAULT_STORES)
+                sid = int(params["store_id"]) if str(params.get("store_id") or "").isdigit() else None
+                plat = _choice(params.get("platform"), ("shopify", "nuvemshop", "woocommerce"), "")
+                sort = _choice(params.get("sort"), ("viral", "viral_score", "rank", "best_seller", "discount", "recent"), "viral_score")
+                starred = params.get("starred") == "1"
+                return self._json({
+                    "products": h.list_products(platform=plat, store_id=sid, q=params.get("q", ""),
+                                                sort=sort, starred_only=starred),
+                    "stores": h.list_stores(),
+                })
             if path == "/api/doctor":
                 from .doctor import checks
                 return self._json(checks(app.settings))
@@ -578,10 +624,50 @@ def _handler(app: StudioServer, bound_host: str):
             if path in ("/api/make", "/api/draft"):
                 kind = "make" if path == "/api/make" else "draft"
                 label = (body.get("script") or {}).get("title") if isinstance(body.get("script"), dict) else None
+                pids = body.get("product_ids")
+                if not label and isinstance(pids, list) and pids:
+                    prods = h.get_products([int(x) for x in pids if str(x).isdigit()])
+                    if prods:
+                        label = prods[0]["title"] if len(prods) == 1 else f"Top {len(prods)} products showcase"
                 label = (label or body.get("topic") or body.get("url")
                          or ("Demo video" if body.get("offline") else
                              "Next idea from the queue" if body.get("source") == "queue" else "AI-picked topic"))
                 return self._json({"job": app.submit(kind, body, str(label)[:120]).id})
+            if path == "/api/products/scout":
+                mode = str(body.get("mode") or "stores")
+                q = str(body.get("query") or body.get("url") or "").strip()
+                label = f"Scout products · {q[:60]}" if q else "Scout best-selling products"
+                return self._json({"job": app.submit("scout", body, label).id})
+            if path == "/api/products/stores":
+                url = str(body.get("url") or "").strip()
+                if not url:
+                    return self._json({"error": "give a store URL"}, 400)
+                if not re.match(r"^https?://", url, re.I):
+                    url = "https://" + url
+                from urllib.parse import urlparse
+                from .products import detect_platform
+                name = str(body.get("name") or "").strip() or urlparse(url).netloc.removeprefix("www.")
+                plat = _choice(body.get("platform"), ("shopify", "nuvemshop", "woocommerce"), "") or detect_platform(url)
+                niche = str(body.get("niche") or "").strip()[:120]
+                sid = h.add_store(name[:80], url[:300], plat, niche)
+                return self._json({"id": sid, "stores": h.list_stores()})
+            m = re.fullmatch(r"/api/products/stores/(\d+)/delete", path)
+            if m:
+                h.delete_store(int(m.group(1)))
+                return self._json({"ok": True, "stores": h.list_stores()})
+            m = re.fullmatch(r"/api/products/(\d+)/affiliate", path)
+            if m:
+                aff = str(body.get("affiliate_url") or "").strip()
+                if not h.set_product_affiliate(int(m.group(1)), aff):
+                    return self._json({"error": "Product not found; the affiliate link was not saved"}, 404)
+                return self._json({"ok": True, "affiliate_url": aff})
+            m = re.fullmatch(r"/api/products/(\d+)/star", path)
+            if m:
+                return self._json({"ok": True, "starred": h.toggle_product_star(int(m.group(1)))})
+            m = re.fullmatch(r"/api/products/(\d+)/delete", path)
+            if m:
+                h.delete_product(int(m.group(1)))
+                return self._json({"ok": True})
             if path == "/api/clip":
                 if not str(body.get("source") or "").strip():
                     return self._json({"error": "give a video file path or URL"}, 400)
@@ -595,11 +681,25 @@ def _handler(app: StudioServer, bound_host: str):
                 return self._json({"job": app.submit("stats", {}, "Refresh channel stats").id})
             if path == "/api/ideas":
                 subject = str(body.get("subject") or "").strip()
+                notes = str(body.get("notes") or "").strip()
+                raw_pids = body.get("product_ids")
+                if isinstance(raw_pids, list) and raw_pids:
+                    pids = [int(x) for x in raw_pids if str(x).isdigit()]
+                    prods = h.get_products(pids)
+                    if prods:
+                        if not subject:
+                            if len(prods) == 1:
+                                subject = prods[0]["title"]
+                            else:
+                                names = ", ".join((p.get("short_name") or p["title"])[:28] for p in prods[:5])
+                                subject = f"Top {len(prods)} products: {names}"
+                        if not notes:
+                            notes = "products:" + ",".join(str(p["id"]) for p in prods)
                 if not subject:
                     return self._json({"error": "empty idea"}, 400)
                 from .script import STYLES
                 return self._json({"id": h.add_idea(subject[:300], _choice(body.get("style"), STYLES, ""),
-                                                    str(body.get("notes") or "")[:500])})
+                                                    notes[:500])})
             m = re.fullmatch(r"/api/ideas/(\d+)/delete", path)
             if m:
                 h.delete_idea(int(m.group(1)))
@@ -609,6 +709,14 @@ def _handler(app: StudioServer, bound_host: str):
                 rec = h.get(int(m.group(1)))
                 label = f"Upload: {rec['title']}" if rec else f"Upload #{m.group(1)}"
                 return self._json({"job": app.submit("upload", {"id": int(m.group(1))}, label).id})
+            m = re.fullmatch(r"/api/videos/(\d+)/resolve-upload", path)
+            if m:
+                try:
+                    status = h.resolve_upload(int(m.group(1)), youtube_id=str(body.get("youtube_id") or "").strip(),
+                                              not_uploaded=body.get("not_uploaded") is True)
+                except ValueError as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json({"status": status})
             m = re.fullmatch(r"/api/videos/(\d+)/delete", path)
             if m:
                 return self._json({"ok": app.studio.delete(int(m.group(1)))})

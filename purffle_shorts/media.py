@@ -12,7 +12,7 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -265,7 +265,8 @@ def _score(item: MediaItem, need: float, orientation: str = "portrait") -> float
 
 class Visuals:
     def __init__(self, settings: Settings, used_keys: set[str] | None = None,
-                 extra_images: list[str] | None = None):
+                 extra_images: list[str] | None = None, extra_videos: list[str] | None = None,
+                 repeat_extra: bool = False, scene_media: list[list[MediaItem]] | None = None):
         self.s = settings
         self.used = set(used_keys or ())
         self.lock = threading.Lock()
@@ -273,10 +274,17 @@ class Visuals:
         self.sources = [x for x in settings.visual_sources if x]
         if settings.offline:
             self.sources = ["local"]
-        self.extra_images = [
+        vids = [
+            MediaItem("product-page", f"vid{i:02d}", "video", url=u)
+            for i, u in enumerate(extra_videos or []) if u and not settings.offline
+        ]
+        imgs = [
             MediaItem("product-page", f"img{i:02d}", "image", url=u)
             for i, u in enumerate(extra_images or []) if u and not settings.offline
         ]
+        self.extra_images = vids + imgs
+        self.repeat_extra = repeat_extra
+        self.scene_media = scene_media or []
         self.credits: set[str] = set()
 
     # -- search per source (cached per query) --
@@ -383,19 +391,30 @@ class Visuals:
         log.info("Scene %d: %s image", idx + 1, source)
         return MediaItem(source, dest.name, "image", path=dest, width=s.width, height=s.height, query=prompt)
 
+    def _extra_candidates_for_scene(self, idx: int) -> list[MediaItem]:
+        if idx < len(self.scene_media) and self.scene_media[idx]:
+            return list(self.scene_media[idx])
+        pool = self.extra_images
+        if not pool:
+            return []
+        if self.repeat_extra:
+            start = idx % len(pool)
+            return pool[start:] + pool[:start]
+        if idx < len(pool):
+            return pool[idx:]
+        return []
+
     def for_scene(self, idx: int, query: str, image_prompt: str, topic: str, need: float, dest_dir: Path) -> MediaItem:
-        if self.extra_images:
-            while True:
-                item = self._claim(self.extra_images, need)
-                if not item:
-                    break
-                try:
-                    item.query = query
-                    self._fetch(item, dest_dir, idx)
-                    log.info("Scene %d: product page image (%s)", idx + 1, item.id)
-                    return item
-                except Exception as e:
-                    log.warning("Product image download failed (%s): %s", item.url[:60], redact(e))
+        for cand in self._extra_candidates_for_scene(idx):
+            item = replace(cand, query=query)
+            try:
+                self._fetch(item, dest_dir, idx)
+                with self.lock:
+                    self.used.add(item.key)
+                log.info("Scene %d: product page %s (%s)", idx + 1, item.kind, item.id)
+                return item
+            except Exception as e:
+                log.warning("Product media download failed (%s): %s", item.url[:60], redact(e))
         queries = []
         for q in (query, simplify_query(query), simplify_query(topic), topic):
             q = (q or "").strip()

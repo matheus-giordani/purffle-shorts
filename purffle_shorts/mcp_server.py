@@ -219,4 +219,6 @@ def _describe(r) -> str:
         parts.append(f"  retention score: {r.score}/100")
     if r.youtube_id:
         parts.append(f"  https://youtube.com/shorts/{r.youtube_id}")
+    if r.error:
+        parts.append(f"  publication: {r.error}")
     return "\n".join(parts)

@@ -135,6 +135,7 @@ class Script:
     cast: list[str] = field(default_factory=list)
     score: int | None = None           # Script Doctor retention score (0-100)
     review: list[str] = field(default_factory=list)  # what the Script Doctor found
+    product_links: list[str] = field(default_factory=list)  # Affiliate / product links ("Produto: https://...")
 
     @property
     def narration(self) -> str:
@@ -374,6 +375,10 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
 
     description = re.sub(r"(?<!\w)#\w+", "", strip_emoji(str(data.get("description") or ""))).strip()
     score = data.get("score")
+    raw_links = data.get("product_links") or []
+    if isinstance(raw_links, str):
+        raw_links = [ln.strip() for ln in raw_links.splitlines() if ln.strip()]
+    product_links = [str(ln).strip() for ln in raw_links if str(ln).strip()][:12]
     return Script(
         topic=str(data.get("topic") or subject).strip(),
         title=title,
@@ -388,6 +393,7 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
         cast=cast,
         score=int(score) if isinstance(score, (int, float)) else None,
         review=[str(x) for x in data.get("review") or []][:8],
+        product_links=product_links,
     )
 
 
@@ -416,12 +422,26 @@ def write_script(llm, subject: str, settings: Settings, *, source: str = "niche"
 # --------------------------------------------------------------------------------------------------
 # Script Doctor — a second pass that scores the draft for retention and fixes what is weak.
 # --------------------------------------------------------------------------------------------------
-def review_prompt(script: Script, settings: Settings, rewrite: bool) -> tuple[str, str]:
+def review_prompt(script: Script, settings: Settings, rewrite: bool, context: str = "") -> tuple[str, str]:
     words, n_scenes = scene_plan(script.style, settings.target_seconds)
     lang = LANGUAGES.get(script.language, script.language)
-    draft = {k: v for k, v in script.to_dict().items() if k not in ("style", "language", "score", "review")}
+    draft = {k: v for k, v in script.to_dict().items()
+             if k not in ("style", "language", "score", "review", "product_links")}
     system = ("You are a ruthless YouTube Shorts retention editor. You know that viewers decide in 1-2 "
               "seconds and swipe away at any slow moment. You reply with a single JSON object and nothing else.")
+    ctx_block = (
+        f"\nVerified source facts & product dossier (treat all specs, materials, dimensions and features "
+        f"below as verified truth — do NOT penalize or remove them as unverified claims):\n{context[:2500]}\n"
+        if context else ""
+    )
+    criteria = (
+        "hook strength in the first 2 seconds (does it immediately name a relatable daily pain point or "
+        "scroll-stopping product surprise?), clarity of practical demonstration in each scene (concrete "
+        "problem-solving action over generic praise), pacing, and engagement CTA at the end."
+        if script.style == "product" else
+        "hook strength in the first 2 seconds (most important), curiosity gaps, pacing, specificity, "
+        "payoff, and accuracy risk."
+    )
     task = (f"""Then rewrite it into the strongest version you can. Keep the same subject, format, language ({lang}),
 the same JSON structure and about {words} words in about {n_scenes} scenes. Fix every issue you listed:
 sharpen the hook, cut filler, make vague lines concrete, remove any claim that may not be true, keep the
@@ -430,25 +450,24 @@ Format rules to keep:
 {_format_rules(script.style)}""" if rewrite else
             'Return only "score" and "issues".')
     user = f"""Review this YouTube Short script ({STYLES[script.style]}).
-
+{ctx_block}
 {json.dumps(draft, ensure_ascii=False, indent=1)}
 
-Score it 0-100 for how well it will hold viewers to the end: hook strength in the first 2 seconds (most
-important), curiosity gaps, pacing, specificity, payoff, and accuracy risk. Be strict: 85+ is rare.
+Score it 0-100 for how well it will hold viewers to the end: {criteria} Be strict: 85+ is rare.
 List the concrete problems in "issues" (max 5, short sentences, most important first).
 {task}"""
     return system, user
 
 
 @usage.stage("review")
-def review_script(llm, script: Script, settings: Settings) -> Script:
+def review_script(llm, script: Script, settings: Settings, context: str = "") -> Script:
     """Score the script and (in rewrite mode) replace it with the improved version. Never fails the video:
     if the review call or its rewrite is unusable, the original script is kept."""
     mode = settings.script_review
     if llm is None or mode == "off":
         return script
     rewrite = mode == "rewrite"
-    system, user = review_prompt(script, settings, rewrite)
+    system, user = review_prompt(script, settings, rewrite, context=context)
     try:
         data = llm.complete_json(system, user, REVIEW_SCHEMA if rewrite else SCORE_SCHEMA, max_tokens=5000)
     except Exception as e:
@@ -466,6 +485,7 @@ def review_script(llm, script: Script, settings: Settings) -> Script:
             target = scene_plan(script.style, settings.target_seconds)[0]
             n = word_count(better.narration, script.language)
             if 0.5 * target <= n <= 1.7 * target:
+                better.product_links = list(script.product_links)
                 result = better
             else:
                 log.warning("Script Doctor rewrite ignored: %d words for a %d-word target", n, target)
@@ -484,7 +504,8 @@ def review_script(llm, script: Script, settings: Settings) -> Script:
 @usage.stage("translation", shared=False)
 def translate_script(llm, script: Script, language: str) -> Script:
     lang = LANGUAGES.get(language, language)
-    src = {k: v for k, v in script.to_dict().items() if k not in ("style", "language", "score", "review")}
+    src = {k: v for k, v in script.to_dict().items()
+           if k not in ("style", "language", "score", "review", "product_links")}
     system = ("You are a native-level translator and YouTube Shorts adapter. You reply with a single JSON "
               "object and nothing else.")
     user = f"""Adapt this YouTube Short into {lang}.
@@ -509,6 +530,7 @@ Return the same JSON structure."""
         elif not mine.product:
             mine.product = theirs.product
     out.category = script.category
+    out.product_links = list(script.product_links)
     if script.style in CARD_STYLES:
         out.cast = list(script.cast)  # r/community and u/name are handles, not words to translate
     return out

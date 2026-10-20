@@ -46,3 +46,6 @@ desktop.ini
 # Misc
 *.txt
 !requirements.txt
+
+docs/
+.impeccable/

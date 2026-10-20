@@ -13,7 +13,7 @@ import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import analytics, ffmpeg, notify, topics, tts, usage, youtube
@@ -79,8 +79,8 @@ def quota_day_start() -> str:
 def seconds_until_quota_reset() -> float:
     from zoneinfo import ZoneInfo
     pt = datetime.now(ZoneInfo("America/Los_Angeles"))
-    nxt = (pt.replace(hour=0, minute=0, second=0, microsecond=0)).timestamp() + 86400
-    return max(60.0, nxt - pt.timestamp() + 120)
+    nxt = (pt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60.0, nxt.timestamp() - pt.timestamp() + 120)
 
 
 def final_title(script: Script, settings: Settings | None = None) -> str:
@@ -90,11 +90,17 @@ def final_title(script: Script, settings: Settings | None = None) -> str:
     return f"{t} #shorts" if len(t) + 8 <= 100 else truncate_words(t, 100)
 
 
-def final_description(script: Script, credits: set[str], settings: Settings) -> str:
-    parts = [script.description.strip()] if script.description.strip() else []
-    tags = script.hashtags if settings.vertical else [h for h in script.hashtags if h.lower() != "#shorts"]
+def final_description(script: Script, credits: set[str] | None = None, settings: Settings | None = None) -> str:
+    desc = script.description.strip()
+    parts = [desc] if desc else []
+    if script.product_links:
+        link_lines = [ln.strip() for ln in script.product_links if ln.strip() and ln.strip() not in desc]
+        if link_lines:
+            parts.append("\n".join(link_lines))
+    vertical = True if settings is None else settings.vertical
+    tags = script.hashtags if vertical else [h for h in script.hashtags if h.lower() != "#shorts"]
     parts.append(" ".join(tags))
-    if settings.credit_footage and credits:
+    if settings and settings.credit_footage and credits:
         parts.append("Footage: " + ", ".join(sorted(credits)))
     return "\n\n".join(p for p in parts if p)
 
@@ -187,18 +193,29 @@ class Studio:
     @usage.tracked("draft")
     def draft(self, topic: str | None = None, *, source: str | None = None, style: str | None = None,
               url: str | None = None, document: str | Path | None = None,
-              idea_id: int | None = None) -> tuple[Script, Topic, str]:
+              idea_id: int | None = None, product_ids: list[int] | None = None,
+              product_links: list[str] | None = None) -> tuple[Script, Topic, str]:
         """Pick a topic, write the script and let the Script Doctor improve it. Nothing is rendered."""
         s = self.s
         self._step("topic")
-        if url:
+        if product_ids:
+            from .products import build_product_topic
+            prods = self.history.get_products(product_ids)
+            if not prods:
+                raise ValueError("Selected products not found")
+            pick = build_product_topic(prods, custom_links=product_links)
+            pick.product_ids = list(product_ids)
+        elif url:
             pick = topics.from_url(url)
         elif document:
             pick = topics.from_document(document)
         else:
             pick = pick_topic(s, self.history, explicit=topic, source=source, idea_id=idea_id)
+        if product_links:
+            pick.product_links = [str(ln).strip() for ln in product_links if str(ln).strip()]
         usage.annotate(title=pick.subject, idea_id=pick.idea_id)
-        if topic and (url or document):
+        usage.use_products(pick.product_ids)
+        if topic and (url or document or product_ids):
             pick.subject = f"{topic} (source: {pick.subject})"
         log.info("Topic [%s]: %s", pick.source, pick.subject)
         try:
@@ -207,9 +224,11 @@ class Studio:
             writer_llm = self.llm_for_stage("script")
             script = write_script(writer_llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
                                   context=pick.context, style=style or pick.style or None, insights=insights)
+            if pick.product_links and not script.product_links:
+                script.product_links = list(pick.product_links)
             if writer_llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
-                script = review_script(self.llm_for_stage("review"), script, s)
+                script = review_script(self.llm_for_stage("review"), script, s, context=pick.context)
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
@@ -222,7 +241,9 @@ class Studio:
              style: str | None = None, script_file: str | Path | None = None, script: Script | None = None,
              url: str | None = None, document: str | Path | None = None,
              languages: list[str] | None = None, idea_id: int | None = None,
-             usage_run_id: str | None = None, source_video_id: int | None = None) -> Result:
+             usage_run_id: str | None = None, source_video_id: int | None = None,
+             product_ids: list[int] | None = None, product_links: list[str] | None = None,
+             extra_images: list[str] | None = None, extra_videos: list[str] | None = None) -> Result:
         t0 = time.time()
         s = self.s
         upload = s.upload if upload is None else upload
@@ -233,11 +254,25 @@ class Studio:
             if script is not None or script_file:
                 if script is None:
                     script = load_script(script_file, s)
-                pick, writer = Topic(script.topic, "script"), ("script file" if script_file else "editor")
+                if product_links and not script.product_links:
+                    script.product_links = [str(ln).strip() for ln in product_links if str(ln).strip()]
+                if product_ids:
+                    from .products import build_product_topic
+                    prods = self.history.get_products(product_ids)
+                    pick = build_product_topic(prods, custom_links=script.product_links) if prods else Topic(script.topic, "script")
+                    pick.product_ids = list(product_ids)
+                    if pick.product_links and not script.product_links:
+                        script.product_links = list(pick.product_links)
+                else:
+                    pick = Topic(script.topic, "script",
+                                 images=list(extra_images or []), videos=list(extra_videos or []),
+                                 product_links=list(script.product_links))
+                writer = "script file" if script_file else "editor"
                 log.info("Script from %s (%d scenes): %s", script_file or "editor", len(script.scenes), script.title)
             else:
                 script, pick, writer = self.draft(topic, source=source, style=style, url=url, document=document,
-                                                  idea_id=idea_id)
+                                                  idea_id=idea_id, product_ids=product_ids, product_links=product_links)
+            usage.use_products(pick.product_ids)
             return self.produce(script, pick, writer, upload=upload, t0=t0, languages=languages, state=state)
         except (youtube.NotAuthorized, LLMConfigError, KeyboardInterrupt):
             raise  # setup problems stop the run instead of failing every video the same way
@@ -283,7 +318,15 @@ class Studio:
             else:
                 jobs = [(script.scenes[st.index].search_query, script.scenes[st.index].image_prompt,
                          st.duration + T) for st in timeline]
-                visuals = Visuals(s, self.history.used_media(), extra_images=pick.images)
+                scene_media = None
+                if pick.product_ids:
+                    from .products import build_scene_media_for_products
+                    prods = self.history.get_products(pick.product_ids)
+                    if prods:
+                        scene_media = build_scene_media_for_products(prods, script.scenes, timeline, offline=s.offline)
+                is_prod = script.style == "product" or bool(pick.product_ids) or pick.source == "products"
+                visuals = Visuals(s, self.history.used_media(), extra_images=pick.images, extra_videos=pick.videos,
+                                  repeat_extra=is_prod, scene_media=scene_media)
                 media = visuals.for_scenes(jobs, script.topic, work / "media")
                 credits = visuals.credits
             by_scene = {st.index: m for st, m in zip(timeline, media)}
@@ -332,6 +375,7 @@ class Studio:
                 "duration": round(info["duration"], 2), "resolution": f"{s.width}x{s.height}",
                 "video_speed": s.video_speed,
                 "llm": writer, "score": script.score, "review": script.review, "cast": script.cast,
+                "product_links": script.product_links,
                 "voice": f"{speech.engine}:{speech.voice}", "timing": speech.timing,
                 "visuals": [{"source": m.source, "id": m.id, "kind": m.kind, "query": m.query} for m in media],
                 "parent_id": parent_id, "created_at": now_iso(),
@@ -351,6 +395,8 @@ class Studio:
                 self.history.mark_topic(pick.key)
             if pick.idea_id and not parent_id:
                 self.history.link_idea(pick.idea_id, rid)
+            if pick.product_ids and not parent_id:
+                self.history.link_products_video(pick.product_ids, rid)
 
             took = time.time() - t0
             log.info("Rendered %s (%.1fs video) in %.0fs -> %s", title, info["duration"], took, video)
@@ -399,58 +445,82 @@ class Studio:
         return self.s.daily_upload_limit - self.history.uploads_since(day)
 
     def upload_record(self, rid: int, result: Result | None = None) -> str:
-        rec = self.history.get(rid)
-        if not rec or not rec.get("video_path") or not Path(rec["video_path"]).exists():
-            log.error("Video #%s has no file to upload", rid)
-            return "missing"
-        if self.quota_left() <= 0:
-            log.warning("Daily upload limit (%d) reached — video #%d queued for tomorrow", self.s.daily_upload_limit, rid)
-            self.history.update_video(rid, status="queued")
+        def outcome(status, error="", **fields):
             if result:
-                result.status = "queued"
-            notify.send(self.s, "queued", title=rec["title"], detail="daily upload limit reached")
-            return "queued"
-        folder = Path(rec["folder"])
-        meta = json.loads((folder / "metadata.json").read_text()) if (folder / "metadata.json").exists() else {}
-        publish = youtube.next_publish_slot(self.s, self.history.scheduled_times())
-        body = youtube.build_body(self.s, rec["title"], rec["description"] or "",
-                                  json.loads(rec["tags"] or "[]"), meta.get("category_id", "27"),
-                                  meta.get("language", self.s.language), publish)
+                result.status, result.error = status, error
+                result.youtube_id = fields.get("youtube_id")
+                result.publish_at = fields.get("publish_at")
+            return status
+
         try:
+            day = quota_day_start()
+            reservation = self.history.reserve_upload(rid, self.s, day, self._refused_on == day)
+        except youtube.NoPublishSlot as e:
+            self.history.update_video(rid, status="queued", error=str(e))
+            log.warning("Video #%d is waiting for a publication slot: %s", rid, e)
+            return outcome("queued", str(e))
+        except (ValueError, KeyError) as e:
+            self.history.update_video(rid, status="failed", error=str(e))
+            log.error("Cannot schedule video #%d: %s", rid, e)
+            return outcome("upload-failed", str(e))
+        status = reservation["status"]
+        if status != "reserved":
+            if reservation.get("error"):
+                log.warning("Video #%d: %s", rid, reservation["error"])
+            if status == "queued":
+                notify.send(self.s, "queued", title=reservation["title"], detail=reservation["error"])
+            return outcome(status, reservation.get("error", ""),
+                           youtube_id=reservation.get("youtube_id"), publish_at=reservation.get("publish_at"))
+
+        rec, token, publish = reservation["record"], reservation["token"], reservation["publish"]
+        started = False
+        try:
+            folder = Path(rec["folder"])
+            meta = json.loads((folder / "metadata.json").read_text()) if (folder / "metadata.json").exists() else {}
+            body = youtube.build_body(self.s, rec["title"], rec["description"] or "",
+                                      json.loads(rec["tags"] or "[]"), meta.get("category_id", "27"),
+                                      meta.get("language", self.s.language), publish)
+            self.history.start_upload(rid, token)
+            started = True
             resp = youtube.upload(self.s, Path(rec["video_path"]), body)
+            vid = resp.get("id")
+            if not isinstance(vid, str) or not vid.strip():
+                raise RuntimeError("YouTube returned no video ID; check the remote upload before retrying")
+            status = "scheduled" if publish else "uploaded"
+            publish_iso = youtube.to_rfc3339(publish) if publish else None
+            self.history.finish_upload(rid, token, "done", status=status, youtube_id=vid,
+                                       uploaded_at=now_iso(), publish_at=publish_iso, error=None)
         except youtube.QuotaExceeded:
             log.warning("YouTube refused the upload (quota or upload limit) — video #%d queued until midnight Pacific",
                         rid)
             self._refused_on = quota_day_start()
-            self.history.update_video(rid, status="queued")
-            if result:
-                result.status = "queued"
+            self.history.finish_upload(rid, token, "failed", status="queued", error=None)
             notify.send(self.s, "queued", title=rec["title"], detail="YouTube's upload limit reached")
-            return "queued"
-        except youtube.NotAuthorized:
+            return outcome("queued")
+        except youtube.NotAuthorized as e:
+            self.history.finish_upload(rid, token, "failed", status="rendered", error=redact(e))
             raise
-        except Exception as e:
+        except BaseException as e:
             log.error("Upload of #%d failed: %s", rid, e)
-            self.history.update_video(rid, status="failed", error=str(e)[:500])
-            if result:
-                result.status, result.error = "upload-failed", str(e)
+            status = "upload-unknown" if started else "failed"
+            error = ("Upload outcome is unknown. Check YouTube and resolve this attempt before retrying. "
+                     if started else "") + redact(e)
+            self.history.finish_upload(rid, token, "unknown" if started else "failed", status=status, error=error)
+            if not isinstance(e, Exception):
+                raise
             notify.send(self.s, "failed", title=rec["title"], detail=f"upload failed: {redact(e)}")
-            return "failed"
-        vid = resp.get("id")
-        status = "scheduled" if publish else "uploaded"
-        publish_iso = youtube.to_rfc3339(publish) if publish else None
-        fields = dict(status=status, youtube_id=vid, uploaded_at=now_iso(), publish_at=publish_iso, error=None)
+            return outcome(status, error)
         if not self.s.keep_videos:
-            Path(rec["video_path"]).unlink(missing_ok=True)
-            fields["video_path"] = None
-        self.history.update_video(rid, **fields)
+            try:
+                Path(rec["video_path"]).unlink(missing_ok=True)
+                self.history.update_video(rid, video_path=None)
+            except OSError as e:
+                log.warning("Video #%d was uploaded, but local cleanup failed: %s", rid, e)
         when = f", goes public {publish.strftime('%a %d %b %H:%M %Z')}" if publish else ""
         log.info("%s: https://youtube.com/shorts/%s%s", status.capitalize(), vid, when)
         notify.send(self.s, status, title=rec["title"], url=f"https://youtube.com/shorts/{vid}",
                     detail=f"public {publish.strftime('%a %d %b %H:%M %Z')}" if publish else "")
-        if result:
-            result.status, result.youtube_id, result.publish_at = status, vid, publish_iso
-        return status
+        return outcome(status, youtube_id=vid, publish_at=publish_iso)
 
     def flush_queue(self, include_rendered: bool = False) -> int:
         statuses = ("queued", "rendered") if include_rendered else ("queued",)

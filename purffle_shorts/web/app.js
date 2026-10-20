@@ -23,6 +23,9 @@ const I = {
   film: '<svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 8h4M3 16h4M17 8h4M17 16h4"/></svg>',
   doc: '<svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>',
   bulb: '<svg viewBox="0 0 24 24"><path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2V16h5v-.1c0-.8.4-1.5 1-2A6 6 0 0 0 12 3z"/></svg>',
+  bag: '<svg viewBox="0 0 24 24"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18M16 10a4 4 0 0 1-8 0"/></svg>',
+  star: '<svg viewBox="0 0 24 24"><path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21 7 14.2 2 9.3l6.9-1z"/></svg>',
+  link: '<svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7"/></svg>',
   scissors: '<svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6 20 18M8.6 16.4 20 6"/></svg>',
   chart: '<svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   refresh: '<svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 4v5h-5"/></svg>',
@@ -47,12 +50,12 @@ const FORMATS = [
 const MULTI = new Set(["dialogue", "chat"]);
 const STAGES = [["topic", "Topic"], ["script", "Script"], ["review", "Review"], ["voice", "Voice"], ["footage", "Footage"],
   ["captions", "Captions"], ["render", "Render"], ["check", "Check"], ["upload", "Upload"]];
-const STATUS_CHIP = { uploaded: "ok", scheduled: "blue", rendered: "accent", queued: "", failed: "bad" };
-const KIND_ICON = { make: I.film, draft: I.pen, clip: I.scissors, plan: I.bulb, upload: I.upload, stats: I.chart };
+const STATUS_CHIP = { uploaded: "ok", scheduled: "blue", rendered: "accent", queued: "", failed: "bad", "upload-unknown": "bad" };
+const KIND_ICON = { make: I.film, draft: I.pen, clip: I.scissors, plan: I.bulb, scout: I.bag, upload: I.upload, stats: I.chart };
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem("purffle." + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem("purffle." + k, JSON.stringify(v)); } catch { /* private mode: fine */ } },
+  set(k, v) { try { localStorage.setItem("purffle." + k, JSON.stringify(v)); return true; } catch { return false; } },
 };
 
 async function get(url) {
@@ -68,10 +71,14 @@ async function post(url, body) {
   return data;
 }
 
+const savedDraft = store.get("draftState", null);
 const S = {
   info: null, options: null, jobs: [], view: "create",
-  form: store.get("form", {}), draft: store.get("draft", null), createJob: store.get("createJob", null),
-  draftSource: store.get("draftSource", {}),
+  form: store.get("form", {}), draft: savedDraft ? savedDraft.script : store.get("draft", null), createJob: store.get("createJob", null),
+  draftSource: savedDraft ? savedDraft.source : store.get("draftSource", {}),
+  previousDraft: store.get("previousDraft", null),
+  affiliateDrafts: store.get("affiliateDrafts", {}),
+  prod: { platform: "", sort: "viral", q: "", starred: false, selected: [], mode: "stores", store_id: "", query: "", scout_plat: "", url: "", limit: 8 },
   lib: { status: "", q: "" }, seen: new Map(), voices: {},
 };
 
@@ -109,7 +116,38 @@ function sel(name, opts, cur) {
 const shortTitle = t => (t || "").replace(/\s*#shorts$/i, "");
 const words = t => (t || "").trim().split(/\s+/).filter(Boolean).length;
 const saveForm = () => store.set("form", S.form);
-const saveDraft = () => { store.set("draft", S.draft); store.set("draftSource", S.draftSource); };
+let draftStorageFailed = false;
+function saveDraft() {
+  // The script and its billing/source identity must change together.
+  const saved = store.set("draftState", { script: S.draft, source: S.draftSource });
+  if (saved) {
+    store.set("draft", S.draft);
+    store.set("draftSource", S.draftSource);
+  } else if (!draftStorageFailed) {
+    toast("This browser could not save your script. Keep this page open and copy your edits before leaving.", "bad", 12000);
+  }
+  draftStorageFailed = !saved;
+  return saved;
+}
+function replaceDraft(script, source = {}) {
+  if (S.draft) {
+    S.previousDraft = { script: S.draft, source: S.draftSource };
+    store.set("previousDraft", S.previousDraft);
+  }
+  S.draft = script ? JSON.parse(JSON.stringify(script)) : null;
+  S.draftSource = JSON.parse(JSON.stringify(source));
+  saveDraft();
+}
+function restorePreviousDraft() {
+  const previous = S.previousDraft;
+  if (!previous || !confirm("Restore the previous script? The current script will be kept as the previous version.")) return;
+  replaceDraft(previous.script, previous.source || {});
+  if (S.draft.language) S.form.language = S.draft.language;
+  if (S.draft.style) S.form.style = S.draft.style;
+  saveForm();
+  drawForm();
+  drawEditor();
+}
 
 // ------------------------------------------------------------------ boot & routing
 async function boot() {
@@ -160,17 +198,21 @@ function status() {
   const ib = $("#ibadge");
   ib.hidden = !i.ideas;
   ib.textContent = i.ideas;
+  const pb = $("#pbadge");
+  if (pb) { pb.hidden = !i.products; pb.textContent = i.products; }
   showCostAlerts(i.costs);
 }
 
-const VIEWS = { create: viewCreate, library: viewLibrary, queue: viewQueue, ideas: viewIdeas, clip: viewClip, channel: viewChannel, costs: viewCosts, system: viewSystem };
+const VIEWS = { create: viewCreate, library: viewLibrary, queue: viewQueue, ideas: viewIdeas, products: viewProducts, clip: viewClip, channel: viewChannel, costs: viewCosts, system: viewSystem };
 function route() {
   const v = (location.hash || "#create").slice(1).split("/")[0];
   S.view = VIEWS[v] ? v : "create";
   $$("#nav a").forEach(a => a.classList.toggle("active", a.dataset.view === S.view));
-  $("#main").innerHTML = "";
+  const m = $("#main");
+  m.onclick = m.onchange = m.oninput = m.onsubmit = null;
+  m.innerHTML = "";
   VIEWS[S.view]();
-  $("#main").focus({ preventScroll: true });
+  m.focus({ preventScroll: true });
   window.scrollTo(0, 0);
 }
 
@@ -201,9 +243,11 @@ function finished(j) {
     if (S.createJob.loaded) return;
     S.createJob.loaded = true;
     store.set("createJob", S.createJob);
-    S.draft = r.script;
-    S.draftSource = { usage_run_id: r.usage_run_id || "" };
-    saveDraft();
+    const source = { usage_run_id: r.usage_run_id || "" };
+    if (r.product_ids && r.product_ids.length) source.product_ids = r.product_ids;
+    if (r.images && r.images.length) source.images = r.images;
+    if (r.videos && r.videos.length) source.videos = r.videos;
+    replaceDraft(r.script, source);
     toast("Script ready — read it, edit anything, then render.", "ok");
     if (S.view === "create") drawSide();
     return;
@@ -212,10 +256,16 @@ function finished(j) {
     toast(`<b>${esc(j.label)}</b><br>${esc((r.error || j.message || "failed").slice(0, 220))}`, "bad", 9000);
   } else if (j.kind === "make" || j.kind === "clip") {
     const id = r.id || (r.clips && r.clips.find(c => c.ok) || {}).id;
-    toast(`<b>${esc(r.title || j.label)}</b> is ready. ${id ? `<a href="#library" data-open="${id}">Watch it</a>` : ""}`, "ok", 9000);
+    const needsReview = [r, ...(r.clips || []), ...(r.variants || [])]
+      .some(v => ["upload-unknown", "upload-failed", "failed"].includes(v.status));
+    toast(`<b>${esc(r.title || j.label)}</b> is ready.${needsReview ? " Some versions or uploads need attention." : ""} ${id ? `<a href="#library" data-open="${id}">Open video</a>` : ""}`, needsReview ? "bad" : "ok", 9000);
+    if (S.view === "products") refreshProductsList();
   } else if (j.kind === "plan") {
     toast(`${r.ideas} new idea(s) in the queue.`, "ok");
     if (S.view === "ideas") viewIdeas();
+  } else if (j.kind === "scout") {
+    toast(`Scouted ${r.products || 0} product(s) with viral dossier.`, "ok");
+    if (S.view === "products") viewProducts();
   } else if (j.kind === "upload") {
     toast(`Upload: ${esc(r.status)}`, r.status === "failed" ? "bad" : "ok");
   } else if (j.kind === "stats") {
@@ -244,9 +294,14 @@ function payload(extra = {}) {
     also_langs: f.also_langs, music: f.music, upload: f.upload && S.info.upload && !f.offline, offline: f.offline,
     visuals: f.visuals,
   };
-  if (f.mode === "topic") p.topic = f.topic.trim();
-  if (f.mode === "url") p.url = f.url.trim();
-  if (f.mode === "queue") p.source = "queue";
+  if (!extra.product_ids && !extra.script && !extra.idea_id) {
+    if (f.mode === "topic") p.topic = f.topic.trim();
+    if (f.mode === "url") {
+      p.url = f.url.trim();
+      if ((f.affiliate_url || "").trim()) p.product_links = [(f.affiliate_url || "").trim()];
+    }
+    if (f.mode === "queue") p.source = "queue";
+  }
   return Object.assign(p, extra.script ? S.draftSource : {}, extra);
 }
 function modelPayload() {
@@ -255,9 +310,14 @@ function modelPayload() {
     .map(stage => [`model_${stage}`, f[`model_${stage}`] || ""]));
 }
 
+let _jobLaunchBusy = false;
 async function startMake(extra = {}) {
+  if (_jobLaunchBusy) return;
   const f = S.form;
-  if (f.mode === "url" && !f.url.trim() && !extra.script) return toast("Paste the address of a web page first.", "bad");
+  if (f.mode === "url" && !f.url.trim() && !extra.script && !extra.product_ids && !extra.idea_id) {
+    return toast("Paste the address of a web page first.", "bad");
+  }
+  _jobLaunchBusy = true;
   try {
     const { job } = await post("/api/make", payload(extra));
     S.createJob = { id: job, kind: "make", session: TOKEN };
@@ -267,19 +327,25 @@ async function startMake(extra = {}) {
     drawSide();
     tick();
   } catch (e) { toast(esc(e.message), "bad"); }
+  finally { _jobLaunchBusy = false; }
 }
-async function startDraft() {
+async function startDraft(extra = {}) {
+  if (_jobLaunchBusy) return;
   const f = S.form;
   if (f.offline) return toast("Drafting needs an AI model. Turn off demo mode (and add a key in .env).", "bad");
-  if (f.mode === "url" && !f.url.trim()) return toast("Paste the address of a web page first.", "bad");
+  if (f.mode === "url" && !f.url.trim() && !extra.product_ids && !extra.idea_id) {
+    return toast("Paste the address of a web page first.", "bad");
+  }
+  _jobLaunchBusy = true;
   try {
-    const { job } = await post("/api/draft", payload());
+    const { job } = await post("/api/draft", payload(extra));
     S.createJob = { id: job, kind: "draft", session: TOKEN };
     store.set("createJob", S.createJob);
     S.seen.set(job, "queued");
     drawSide();
     tick();
   } catch (e) { toast(esc(e.message), "bad"); }
+  finally { _jobLaunchBusy = false; }
 }
 
 function viewCreate() {
@@ -302,8 +368,10 @@ function drawForm() {
     <h2>What's it about?</h2>
     <div class="src-tabs">${seg("mode", [["topic", "Topic"], ["url", "Web page"], ["queue", "Idea queue"], ["auto", "Surprise me"]], f.mode)}</div>
     ${f.mode === "topic" ? `<div class="field"><input type="text" data-f="topic" value="${esc(f.topic)}" placeholder="e.g. Why octopuses have three hearts" aria-label="Topic"><p class="hint">Be as broad or specific as you like — the AI finds the surprising angle.</p></div>`
-    : f.mode === "url" ? `<div class="field"><input type="url" data-f="url" value="${esc(f.url)}" placeholder="https://… an article, product page, blog post or Wikipedia page" aria-label="Web page"><p class="hint">The page's text (or product info & photos) becomes the script's source material.</p></div>`
-    : f.mode === "queue" ? `<p class="hint">Uses the oldest idea from your queue (${i_ideas()} waiting) — plan more on the <a href="#ideas">Ideas</a> page.</p>`
+    : f.mode === "url" ? `<div class="field"><input type="url" data-f="url" value="${esc(f.url)}" placeholder="https://… an article, product page, blog post or Wikipedia page" aria-label="Web page">
+      <input type="text" data-f="affiliate_url" value="${esc(f.affiliate_url || "")}" placeholder="Affiliate link (optional) — e.g. Produto 1: https://amzn.to/..." aria-label="Affiliate link">
+      <p class="hint">The page's text (or product info & photos) becomes the script's source material — or scout best-sellers on <a href="#products">Products</a>.</p></div>`
+    : f.mode === "queue" ? `<p class="hint">Uses the oldest idea from your queue (${i_ideas()} waiting) — plan more on the <a href="#ideas">Ideas</a> or <a href="#products">Products</a> page.</p>`
     : `<p class="hint">Picks a fresh topic from your niches and topic sources in .env.</p>`}
   </section>
 
@@ -405,7 +473,7 @@ function bindForm() {
     saveForm();
   });
   $("#make-btn").onclick = () => startMake();
-  $("#draft-btn").onclick = startDraft;
+  $("#draft-btn").onclick = () => startDraft();
 }
 
 async function loadVoices() {
@@ -470,20 +538,25 @@ function drawEditor() {
     box.innerHTML = `<section class="card"><h2>Preview</h2>
       <div class="phone"><div class="bar"></div><div class="ph-hook">This animal has 3 hearts</div>${capSample(f.caption_style)}</div>
       <p class="hint">Caption style <b>${esc(f.caption_style)}</b> · ${esc(f.aspect)} · ${esc(f.language)}</p>
+      ${S.previousDraft ? `<button class="btn ghost sm" id="restore-draft" type="button">${I.pen}Restore previous script</button>` : ""}
       <div class="list">
         <div class="item"><span class="chip accent">1</span><div class="grow"><b>Draft script</b><small>The AI writes it, the Script Doctor scores and improves it, and you edit any line before rendering.</small></div></div>
         <div class="item"><span class="chip accent">2</span><div class="grow"><b>Create video</b><small>Voice, footage, word-synced captions, music and render in one go — about a minute.</small></div></div>
         <div class="item"><span class="chip accent">3</span><div class="grow"><b>Publish</b><small>Upload or schedule from the Library, or turn on upload here.</small></div></div>
       </div></section>`;
+    const restore = $("#restore-draft");
+    if (restore) restore.onclick = restorePreviousDraft;
     return;
   }
   const multi = MULTI.has(d.style) || d.scenes.some(s => s.speaker === "B");
   const isProduct = d.style === "product";
+  const hasLinks = isProduct || (d.product_links && d.product_links.length);
   const total = d.scenes.reduce((n, s) => n + words(s.narration), 0);
   const target = Math.round((f.duration || 40) * 2.6);
   box.innerHTML = `<section class="card">
     <div class="actions"><h2>Script</h2><span class="chip">${esc(d.style)}</span><span class="chip">${esc(d.language)}</span>
       <span class="wc" id="wc">${total} words · ~${Math.round(total / 2.6)}s</span>
+      ${S.previousDraft ? `<button class="btn ghost sm" id="restore-draft" type="button">Restore previous script</button>` : ""}
       <button class="btn ghost sm" id="discard" type="button">${I.trash}Discard</button></div>
     ${d.score != null ? `<div class="score"><div class="ring" data-p="${d.score}"><b>${d.score}</b></div><div><b>Retention score</b>${d.review && d.review.length ? `<ul>${d.review.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : `<p class="hint">No issues found.</p>`}</div></div>` : ""}
     <div class="field"><label>Title</label><input type="text" data-k="title" value="${esc(d.title)}" maxlength="90"></div>
@@ -510,6 +583,7 @@ function drawEditor() {
       </div>`).join("")}</div>
     <div class="actions"><button class="btn ghost sm" type="button" data-act="add">${I.plus}Add scene</button></div></div>
     <div class="field"><label>Description</label><textarea data-k="description">${esc(d.description)}</textarea></div>
+    ${hasLinks ? `<div class="field"><label>Product / Affiliate links <span class="hint">· added to YouTube description (Produto 1: link)</span></label><textarea data-plinks placeholder="Produto 1: https://...&#10;Produto 2: https://...">${esc((d.product_links || []).join("\n"))}</textarea></div>` : ""}
     <div class="field"><label>Hashtags</label><input type="text" data-tags value="${esc((d.hashtags || []).join(" "))}"></div>
     <div class="go-row"><span></span><button class="btn primary" id="render-btn" type="button">${I.play}Render this script</button></div>
   </section>`;
@@ -519,6 +593,7 @@ function drawEditor() {
     if (el.dataset.k) d[el.dataset.k] = el.value;
     else if (el.dataset.s) d.scenes[+el.dataset.i][el.dataset.s] = el.value;
     else if (el.dataset.cast) { d.cast = d.cast || ["", ""]; d.cast[+el.dataset.cast] = el.value; }
+    else if (el.hasAttribute("data-plinks")) d.product_links = el.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
     else if (el.hasAttribute("data-tags")) d.hashtags = el.value.split(/\s+/).filter(Boolean);
     const t = d.scenes.reduce((n, s) => n + words(s.narration), 0);
     $("#wc").textContent = `${t} words · ~${Math.round(t / 2.6)}s`;
@@ -536,7 +611,9 @@ function drawEditor() {
     saveDraft();
     drawEditor();
   };
-  $("#discard").onclick = () => { if (confirm("Discard this script?")) { S.draft = null; saveDraft(); drawEditor(); } };
+  const restore = $("#restore-draft");
+  if (restore) restore.onclick = restorePreviousDraft;
+  $("#discard").onclick = () => { if (confirm("Discard this script?")) { replaceDraft(null); drawEditor(); } };
   $("#render-btn").onclick = () => {
     const clean = Object.assign({}, d, { scenes: d.scenes.filter(s => s.narration.trim()) });
     if (!clean.scenes.length) return toast("The script has no narration.", "bad");
@@ -548,7 +625,7 @@ function drawEditor() {
 function viewLibrary() {
   $("#main").innerHTML = `
   <div class="page-head"><div><h1>Library</h1><p>Everything you've made. Click a video to watch, edit, upload or delete it.</p></div></div>
-  <div class="toolbar">${seg("lib", [["", "All"], ["rendered", "Ready"], ["scheduled", "Scheduled"], ["uploaded", "Uploaded"], ["queued", "Queued"], ["failed", "Failed"]], S.lib.status)}
+  <div class="toolbar">${seg("lib", [["", "All"], ["rendered", "Ready"], ["scheduled", "Scheduled"], ["uploaded", "Uploaded"], ["queued", "Queued"], ["failed", "Failed"], ["upload-unknown", "Check upload"]], S.lib.status)}
     <input type="search" id="lib-q" placeholder="Search titles" value="${esc(S.lib.q)}" aria-label="Search"></div>
   <div class="lib" id="lib"></div>`;
   $(".toolbar").addEventListener("click", e => {
@@ -602,10 +679,14 @@ async function openVideo(id) {
       ${v.youtube_id ? `<p><a class="btn sm" href="https://youtube.com/shorts/${esc(v.youtube_id)}" target="_blank" rel="noopener">${I.yt}Open on YouTube</a>${v.publish_at ? ` <span class="muted">goes public ${esc(new Date(v.publish_at).toLocaleString())}</span>` : ""}</p>` : ""}
       ${v.error ? `<div class="banner">${I.info}<p>${esc(v.error)}</p></div>` : ""}
       <div class="actions">
-        ${v.video && !v.youtube_id ? `<button class="btn primary sm" type="button" id="d-up">${I.upload}Upload</button>` : ""}
+        ${v.video && !v.youtube_id && !["unknown", "reserved", "uploading"].includes(v.upload_state) ? `<button class="btn primary sm" type="button" id="d-up">${I.upload}Upload</button>` : ""}
         ${sc ? `<button class="btn sm" type="button" id="d-edit">${I.pen}Edit & re-render</button>` : ""}
         <button class="btn sm danger" type="button" id="d-del">${I.trash}Delete</button>
       </div>
+      ${v.upload_state === "unknown" ? `<p class="hint">Check your YouTube channel before trying again. Link the existing video, or confirm that no upload exists.</p>
+        <div class="actions"><a class="btn sm" href="https://studio.youtube.com" target="_blank" rel="noopener">${I.yt}Check YouTube Studio</a>
+          <button class="btn sm" type="button" id="d-link-upload">Link published video</button>
+          <button class="btn sm" type="button" id="d-reset-upload">Confirm not uploaded</button></div>` : ""}
       ${v.score != null ? `<div class="score"><div class="ring" data-p="${v.score}"><b>${v.score}</b></div><div><b>Retention score</b>${review.length ? `<ul>${review.map(x => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}</div></div>` : ""}
       <dl class="kv">
         <dt>Length</dt><dd>${fmtSec(v.duration)}</dd>
@@ -626,11 +707,29 @@ async function openVideo(id) {
   showDrawer(opener);
   const up = $("#d-up");
   if (up) up.onclick = async () => { up.disabled = true; try { await post("/api/upload/" + id); toast("Upload queued — follow it in Queue.", "info"); tick(); } catch (e) { toast(esc(e.message), "bad"); } };
+  const resolveUpload = async (button, body) => {
+    button.disabled = true;
+    try {
+      await post(`/api/videos/${id}/resolve-upload`, body);
+      toast("Upload resolved. No new upload was started.", "ok");
+      await openVideo(id);
+      drawLibrary();
+    } catch (e) { toast(esc(e.message), "bad"); }
+    finally { button.disabled = false; }
+  };
+  const linkUpload = $("#d-link-upload"), resetUpload = $("#d-reset-upload");
+  if (linkUpload) linkUpload.onclick = () => {
+    const youtubeId = prompt("Enter the existing YouTube video ID after checking that it is this video (not the URL):");
+    if (youtubeId?.trim()) resolveUpload(linkUpload, { youtube_id: youtubeId.trim() });
+  };
+  if (resetUpload) resetUpload.onclick = () => {
+    if (confirm("Have you checked YouTube and confirmed that this video was not uploaded? Allow another attempt only if no copy exists.")) {
+      resolveUpload(resetUpload, { not_uploaded: true });
+    }
+  };
   const ed = $("#d-edit");
   if (ed) ed.onclick = () => {
-    S.draft = Object.assign({}, sc, { title: (sc.title || "").replace(/\s*#shorts$/i, "") });
-    S.draftSource = { source_video_id: id };
-    saveDraft();
+    replaceDraft(Object.assign({}, sc, { title: (sc.title || "").replace(/\s*#shorts$/i, "") }), { source_video_id: id });
     if (sc.language) S.form.language = sc.language;
     if (sc.style) S.form.style = sc.style;
     S.form.speed = m.video_speed || 1;
@@ -767,6 +866,414 @@ async function viewIdeas() {
 }
 async function refreshInfo() { try { S.info = await get("/api/info"); status(); } catch { /* ignore */ } }
 
+// ------------------------------------------------------------------ PRODUCTS (GARIMPO)
+const PLAT_CHIP = { shopify: "ok", nuvemshop: "blue", woocommerce: "accent" };
+
+async function viewProducts() {
+  const main = $("#main");
+  const pr = S.prod;
+  let data;
+  try {
+    const q = new URLSearchParams({ platform: pr.platform, sort: pr.sort, q: pr.q, starred: pr.starred ? "1" : "" });
+    data = await get("/api/products?" + q.toString());
+  } catch (e) { main.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  if (S.view !== "products") return;
+  S.prodData = data;
+  const stores = data.stores || [];
+  main.innerHTML = `
+  <div class="page-head"><div><h1>Products · Garimpo Viral</h1><p>Descubra os produtos mais vendidos em lojas Shopify, Nuvemshop e WooCommerce com dossiê criativo de IA e links de afiliado prontos para postar.</p></div></div>
+  <div class="grid2">
+    <section class="card" id="scout-card"></section>
+    <section class="card">
+      <h2>Lojas Favoritas · ${stores.length}</h2>
+      <div class="store-list" id="store-list">
+        ${stores.length ? stores.map(st => `
+          <div class="item">
+            <span class="chip ${PLAT_CHIP[st.platform] || ""}">${esc(st.platform)}</span>
+            <div class="grow">
+              <b><a href="${esc(st.url)}" target="_blank" rel="noopener">${esc(st.name)}</a></b>
+              <small>${esc(st.niche || st.url)}${st.last_scouted_at ? ` · garimpada ${ago(st.last_scouted_at)}` : ""}</small>
+            </div>
+            <button class="btn sm" type="button" data-scout-store="${st.id}">${I.spark}Garimpar</button>
+            <button class="btn ghost sm" type="button" data-del-store="${st.id}" aria-label="Remover loja">${I.trash}</button>
+          </div>`).join("") : `<div class="empty">Nenhuma loja cadastrada.</div>`}
+      </div>
+      <details class="more">
+        <summary>Adicionar loja (Shopify, Nuvemshop ou WooCommerce)</summary>
+        <div class="grid2">
+          <div class="field"><label>URL da loja</label><input type="url" id="st-url" placeholder="https://sualoja.com.br"></div>
+          <div class="field"><label>Nome (opcional)</label><input type="text" id="st-name" placeholder="Ex: Achadinhos Casa"></div>
+        </div>
+        <div class="grid2">
+          <div class="field"><label>Plataforma</label><select id="st-plat"><option value="">Auto-detectar</option><option value="shopify">Shopify</option><option value="nuvemshop">Nuvemshop</option><option value="woocommerce">WooCommerce</option></select></div>
+          <div class="field"><label>Nicho</label><input type="text" id="st-niche" placeholder="Ex: casa & cozinha"></div>
+        </div>
+        <div class="actions end"><button class="btn sm" id="st-add" type="button">${I.plus}Salvar loja</button></div>
+      </details>
+    </section>
+  </div>
+  <div id="psel-bar"></div>
+  <div class="toolbar" id="ptoolbar">
+    ${seg("p-plat", [["", "Todas"], ["shopify", "Shopify"], ["nuvemshop", "Nuvemshop"], ["woocommerce", "WooCommerce"]], pr.platform)}
+    ${seg("p-sort", [["viral", "Maior Viral Score"], ["rank", "Mais Vendidos (#Rank)"], ["discount", "Maior Desconto"], ["recent", "Recentes"]], pr.sort)}
+    <button class="btn sm${pr.starred ? " primary" : ""}" id="p-star-btn" type="button" aria-pressed="${pr.starred}">${I.star}Favoritos</button>
+    <input type="search" id="p-q" placeholder="Buscar produto, dor ou gancho…" value="${esc(pr.q)}" aria-label="Buscar produtos">
+  </div>
+  <div class="pgrid" id="pgrid"></div>`;
+  drawScoutCard(stores);
+  drawProductSelectionBar();
+  drawProductsGrid(data.products || []);
+  bindProductsView();
+}
+
+function drawScoutCard(stores) {
+  const box = $("#scout-card");
+  if (!box) return;
+  const pr = S.prod;
+  const storeOpts = [["", "Todas as lojas favoritas (Top Best-Sellers)"], ...stores.map(s => [String(s.id), `${s.name} (${s.platform})`])];
+  box.innerHTML = `
+    <h2>Garimpar produtos com IA</h2>
+    <div class="src-tabs">${seg("scout-mode", [["stores", "Lojas Virais"], ["search", "Buscar Nicho"], ["url", "URL Direta"]], pr.mode)}</div>
+    ${pr.mode === "stores" ? `
+      <div class="field"><label>Fonte</label><select id="ps-store">${storeOpts.map(([v, l]) => `<option value="${esc(v)}"${String(v) === String(pr.store_id) ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+        <p class="hint">Extrai o ranking de mais vendidos (<span class="mono">best-selling</span> / popularidade), fotos, vídeos e cria o dossiê de roteiro.</p></div>
+      <div class="field"><label>Quantos produtos</label><div class="range-row"><input type="range" id="ps-limit" min="3" max="16" value="${pr.limit}"><output id="ps-limit-out">${pr.limit}</output></div></div>`
+    : pr.mode === "search" ? `
+      <div class="grid2">
+        <div class="field"><label>Nicho ou palavra-chave</label><input type="text" id="ps-query" value="${esc(pr.query)}" placeholder="ex: gadgets cozinha, pet, limpeza"></div>
+        <div class="field"><label>Plataforma</label><select id="ps-plat"><option value="">Todas (Shopify + Nuvemshop + Woo)</option><option value="shopify"${pr.scout_plat === "shopify" ? " selected" : ""}>Shopify</option><option value="nuvemshop"${pr.scout_plat === "nuvemshop" ? " selected" : ""}>Nuvemshop</option><option value="woocommerce"${pr.scout_plat === "woocommerce" ? " selected" : ""}>WooCommerce</option></select></div>
+      </div>
+      <div class="field"><label>Quantos produtos</label><div class="range-row"><input type="range" id="ps-limit" min="3" max="16" value="${pr.limit}"><output id="ps-limit-out">${pr.limit}</output></div></div>`
+    : `
+      <div class="field"><label>URL de produto ou loja</label><input type="url" id="ps-url" value="${esc(pr.url)}" placeholder="https://… página de produto ou loja Shopify / Nuvemshop / WooCommerce">
+        <p class="hint">Se for link de loja, garimpa os mais vendidos; se for link de produto, extrai fotos, vídeo MP4, preço e dossiê.</p></div>`}
+    <div class="actions end"><button class="btn primary" id="ps-go" type="button">${I.spark}Garimpar agora</button></div>`;
+  box.onclick = e => {
+    const b = e.target.closest("[data-seg=scout-mode]");
+    if (b) { pr.mode = b.dataset.v; drawScoutCard(stores); }
+  };
+  const lim = $("#ps-limit", box);
+  if (lim) lim.oninput = e => { pr.limit = +e.target.value; $("#ps-limit-out", box).textContent = pr.limit; };
+  const st = $("#ps-store", box);
+  if (st) st.onchange = e => { pr.store_id = e.target.value; };
+  const q = $("#ps-query", box);
+  if (q) q.oninput = e => { pr.query = e.target.value; };
+  const pl = $("#ps-plat", box);
+  if (pl) pl.onchange = e => { pr.scout_plat = e.target.value; };
+  const u = $("#ps-url", box);
+  if (u) u.oninput = e => { pr.url = e.target.value; };
+  $("#ps-go", box).onclick = async e => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return;
+    if (pr.mode === "search" && !pr.query.trim()) return toast("Digite um nicho ou palavra-chave para buscar.", "bad");
+    if (pr.mode === "url" && !pr.url.trim()) return toast("Cole a URL do produto ou da loja.", "bad");
+    btn.disabled = true;
+    try {
+      await post("/api/products/scout", {
+        mode: pr.mode, store_id: pr.store_id, query: pr.query, platform: pr.scout_plat, url: pr.url, limit: pr.limit,
+        provider: S.form.provider, model: S.form.model, ...modelPayload(),
+      });
+      toast("Garimpando produtos e gerando dossiê viral… acompanhe em Queue.", "info");
+      tick();
+    } catch (err) { toast(esc(err.message), "bad"); }
+    finally { btn.disabled = false; }
+  };
+}
+
+function drawProductSelectionBar() {
+  const bar = $("#psel-bar");
+  if (!bar) return;
+  const sel = S.prod.selected;
+  if (!sel.length) { bar.innerHTML = ""; return; }
+  const all = (S.prodData && S.prodData.products) || [];
+  const items = sel.map((id, i) => {
+    const p = all.find(x => x.id === id);
+    return `<span class="chip accent">${i + 1}. ${esc(p ? (p.short_name || p.title.slice(0, 20)) : "#" + id)}</span>`;
+  }).join("");
+  bar.innerHTML = `<section class="card psel-bar">
+    <div class="grow">
+      <b>${sel.length === 1 ? "1 produto selecionado (Review único)" : `${sel.length} produtos selecionados (Vídeo compilado “Top Achadinhos”)`}</b>
+      <div class="chips">${items}</div>
+    </div>
+    <div class="actions">
+      <button class="btn sm" type="button" id="psel-draft">${I.pen}Draft script (${sel.length})</button>
+      <button class="btn sm primary" type="button" id="psel-make">${I.play}Create video (${sel.length})</button>
+      <button class="btn sm" type="button" id="psel-queue">${I.plus}Add to Idea Queue</button>
+      <button class="btn sm ghost" type="button" id="psel-clear">${I.x}Limpar</button>
+    </div>
+  </section>`;
+  $("#psel-draft", bar).onclick = () => startProductVideo([...sel], true);
+  $("#psel-make", bar).onclick = () => startProductVideo([...sel], false);
+  $("#psel-queue", bar).onclick = () => queueProductIdea([...sel]);
+  $("#psel-clear", bar).onclick = () => { S.prod.selected = []; drawProductSelectionBar(); drawProductsGrid((S.prodData && S.prodData.products) || []); };
+}
+
+function drawProductsGrid(products) {
+  const box = $("#pgrid");
+  if (!box) return;
+  if (!products.length) {
+    box.innerHTML = `<div class="empty"><b>Nenhum produto encontrado</b>Clique em <b>Garimpar agora</b> acima para buscar os produtos mais vendidos das lojas Shopify, Nuvemshop e WooCommerce.</div>`;
+    return;
+  }
+  const sel = S.prod.selected;
+  box.innerHTML = products.map(p => {
+    const img = (p.images && p.images[0]) || "";
+    const selIdx = sel.indexOf(p.id);
+    const vscore = p.viral_score || 0;
+    return `<article class="pcard${selIdx >= 0 ? " selected" : ""}">
+      <div class="pthumb">
+        ${img ? `<img src="${esc(img)}" alt="" loading="lazy">` : `<div class="ph">Sem imagem</div>`}
+        <div class="tl">
+          <button type="button" class="psel-btn${selIdx >= 0 ? " on" : ""}" data-psel="${p.id}" title="Selecionar para vídeo (1 a 5 produtos)">${selIdx >= 0 ? selIdx + 1 : "+"}</button>
+          <span class="chip ${PLAT_CHIP[p.platform] || ""}">${esc(p.platform || "web")}</span>
+          ${p.best_seller_rank ? `<span class="chip accent">#${p.best_seller_rank} Top</span>` : ""}
+          ${p.discount_pct > 0 ? `<span class="chip ok">-${p.discount_pct}%</span>` : ""}
+          ${p.videos && p.videos.length ? `<span class="chip blue">MP4</span>` : ""}
+        </div>
+        <button type="button" class="pstar${p.starred ? " on" : ""}" data-pstar="${p.id}" aria-label="Favoritar">${I.star}</button>
+        <div class="br"><span class="chip ${vscore >= 75 ? "ok" : vscore >= 55 ? "accent" : ""}">Viral ${vscore}</span></div>
+      </div>
+      <div class="pbody">
+        <div class="phead">
+          <span class="chip accent" title="Nome curto no badge do topo">${esc(p.short_name || p.title.slice(0, 22))}</span>
+          <span class="sub">${esc(p.store_name || "")}</span>
+        </div>
+        <a class="ptitle" href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
+        <div class="pprice">
+          <b>${esc(p.price || "Consultar")}</b>
+          ${p.compare_price ? `<del>${esc(p.compare_price)}</del>` : ""}
+          ${p.rating ? `<span class="sub">★ ${p.rating}${p.reviews_count ? ` (${fmtNum(p.reviews_count)})` : ""}</span>` : ""}
+        </div>
+        <div class="pdossier">
+          ${p.pain_point ? `<div class="pd-row"><b>Dor:</b> <span>${esc(p.pain_point)}</span></div>` : ""}
+          ${p.hook_idea ? `<div class="pd-row"><b>Gancho 2s:</b> <span>“${esc(p.hook_idea)}”</span></div>` : ""}
+          ${p.visual_angle ? `<div class="pd-row"><b>Cena:</b> <span>${esc(p.visual_angle)}</span></div>` : ""}
+          ${p.benefits && p.benefits.length ? `<div class="chips">${p.benefits.slice(0, 3).map(b => `<span class="chip">${esc(b)}</span>`).join("")}</div>` : ""}
+        </div>
+        <div class="paff">
+          <label>${I.link}<span>Link de afiliado (descrição do vídeo)</span></label>
+          <div class="paff-row">
+            <input type="url" data-paff="${p.id}" value="${esc(S.affiliateDrafts[p.id] ?? p.affiliate_url ?? "")}" placeholder="https://s.shopee.com.br/... ou link de afiliado">
+            <button class="btn ghost sm" type="button" data-paff-save="${p.id}">Salvar</button>
+          </div>
+        </div>
+        <div class="pactions">
+          <button class="btn sm" type="button" data-pdraft="${p.id}">${I.pen}Draft</button>
+          <button class="btn sm primary" type="button" data-pmake="${p.id}">${I.play}Make video</button>
+          <button class="btn ghost sm" type="button" data-pqueue="${p.id}" title="Enviar para a fila Ideas">${I.plus}Queue</button>
+          ${p.video_id ? `<button class="btn ghost sm" type="button" data-open="${p.video_id}" title="Assistir vídeo gerado">${I.film}</button>` : ""}
+          <button class="btn ghost sm" type="button" data-pdel="${p.id}" aria-label="Excluir">${I.trash}</button>
+        </div>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+async function refreshProductsList() {
+  const pr = S.prod;
+  try {
+    const q = new URLSearchParams({ platform: pr.platform, sort: pr.sort, q: pr.q, starred: pr.starred ? "1" : "" });
+    S.prodData = await get("/api/products?" + q.toString());
+    drawProductsGrid(S.prodData.products || []);
+    drawProductSelectionBar();
+  } catch (e) { toast(esc(e.message), "bad"); }
+}
+
+function bindProductsView() {
+  const main = $("#main");
+  const pr = S.prod;
+  let searchTimer;
+  const pq = $("#p-q");
+  if (pq) pq.oninput = e => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { pr.q = e.target.value; refreshProductsList(); }, 200); };
+  const starBtn = $("#p-star-btn");
+  if (starBtn) starBtn.onclick = () => {
+    pr.starred = !pr.starred;
+    starBtn.classList.toggle("primary", pr.starred);
+    starBtn.setAttribute("aria-pressed", String(pr.starred));
+    refreshProductsList();
+  };
+  const stAdd = $("#st-add");
+  if (stAdd) stAdd.onclick = async () => {
+    const url = ($("#st-url")?.value || "").trim();
+    if (!url) return toast("Informe a URL da loja.", "bad");
+    try {
+      await post("/api/products/stores", {
+        url, name: ($("#st-name")?.value || "").trim(),
+        platform: $("#st-plat")?.value || "", niche: ($("#st-niche")?.value || "").trim(),
+      });
+      toast("Loja adicionada!", "ok");
+      viewProducts();
+    } catch (e) { toast(esc(e.message), "bad"); }
+  };
+  main.oninput = e => {
+    const aff = e.target.closest("[data-paff]");
+    if (aff) {
+      S.affiliateDrafts[aff.dataset.paff] = aff.value;
+      store.set("affiliateDrafts", S.affiliateDrafts);
+    }
+  };
+  main.onchange = async e => {
+    const aff = e.target.closest("[data-paff]");
+    if (aff) {
+      const id = +aff.dataset.paff;
+      const val = aff.value.trim();
+      try {
+        await saveAffiliate(id, val);
+        toast("Link de afiliado salvo.", "ok", 2200);
+      } catch (err) { toast(esc(err.message), "bad"); }
+    }
+  };
+  main.onclick = async e => {
+    const segBtn = e.target.closest("[data-seg]");
+    if (segBtn && (segBtn.dataset.seg === "p-plat" || segBtn.dataset.seg === "p-sort")) {
+      const k = segBtn.dataset.seg === "p-plat" ? "platform" : "sort";
+      pr[k] = segBtn.dataset.v;
+      $$(`[data-seg="${segBtn.dataset.seg}"]`, main).forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === pr[k])));
+      refreshProductsList();
+      return;
+    }
+    const scStore = e.target.closest("[data-scout-store]");
+    if (scStore) {
+      if (scStore.disabled) return;
+      scStore.disabled = true;
+      try {
+        await post("/api/products/scout", { mode: "stores", store_id: +scStore.dataset.scoutStore, limit: pr.limit,
+          provider: S.form.provider, model: S.form.model, ...modelPayload() });
+        toast("Garimpando loja… acompanhe em Queue.", "info");
+        tick();
+      } catch (err) { toast(esc(err.message), "bad"); }
+      finally { scStore.disabled = false; }
+      return;
+    }
+    const delStore = e.target.closest("[data-del-store]");
+    if (delStore) {
+      await post(`/api/products/stores/${delStore.dataset.delStore}/delete`).catch(() => {});
+      viewProducts();
+      return;
+    }
+    const selBtn = e.target.closest("[data-psel]");
+    if (selBtn) {
+      const id = +selBtn.dataset.psel;
+      const idx = pr.selected.indexOf(id);
+      if (idx >= 0) pr.selected.splice(idx, 1);
+      else if (pr.selected.length >= 5) return toast("Selecione no máximo 5 produtos para um Short compilado.", "bad");
+      else pr.selected.push(id);
+      drawProductSelectionBar();
+      drawProductsGrid((S.prodData && S.prodData.products) || []);
+      return;
+    }
+    const star = e.target.closest("[data-pstar]");
+    if (star) {
+      const id = +star.dataset.pstar;
+      try {
+        const { starred } = await post(`/api/products/${id}/star`);
+        const item = (S.prodData?.products || []).find(x => x.id === id);
+        if (item) item.starred = starred;
+        drawProductsGrid((S.prodData && S.prodData.products) || []);
+      } catch (err) { toast(esc(err.message), "bad"); }
+      return;
+    }
+    const affSave = e.target.closest("[data-paff-save]");
+    if (affSave) {
+      const id = +affSave.dataset.paffSave;
+      const input = $(`[data-paff="${id}"]`, main);
+      if (input) {
+        const val = input.value.trim();
+        try {
+          await saveAffiliate(id, val);
+          toast("Link de afiliado salvo.", "ok", 2200);
+        } catch (err) { toast(esc(err.message), "bad"); }
+      }
+      return;
+    }
+    const pdraft = e.target.closest("[data-pdraft]");
+    if (pdraft) { startProductVideo([+pdraft.dataset.pdraft], true); return; }
+    const pmake = e.target.closest("[data-pmake]");
+    if (pmake) { startProductVideo([+pmake.dataset.pmake], false); return; }
+    const pqueue = e.target.closest("[data-pqueue]");
+    if (pqueue) { queueProductIdea([+pqueue.dataset.pqueue]); return; }
+    const pdel = e.target.closest("[data-pdel]");
+    if (pdel) {
+      const id = +pdel.dataset.pdel;
+      await post(`/api/products/${id}/delete`).catch(() => {});
+      pr.selected = pr.selected.filter(x => x !== id);
+      refreshProductsList();
+      refreshInfo();
+    }
+  };
+}
+
+const affiliateSaves = new Map();
+function saveAffiliate(id, value) {
+  const pending = affiliateSaves.get(id);
+  if (pending?.value === value) return pending.promise;
+  const promise = (pending?.promise || Promise.resolve()).catch(() => {}).then(async () => {
+    await post(`/api/products/${id}/affiliate`, { affiliate_url: value });
+    const item = (S.prodData?.products || []).find(x => x.id === id);
+    if (item) item.affiliate_url = value;
+    if (S.affiliateDrafts[id]?.trim() === value) {
+      delete S.affiliateDrafts[id];
+      store.set("affiliateDrafts", S.affiliateDrafts);
+    }
+  });
+  affiliateSaves.set(id, { value, promise });
+  const clear = () => { if (affiliateSaves.get(id)?.promise === promise) affiliateSaves.delete(id); };
+  promise.then(clear, clear);
+  return promise;
+}
+
+async function flushAffiliateInputs(ids) {
+  const main = $("#main");
+  if (!main) return;
+  const products = (S.prodData && S.prodData.products) || [];
+  for (const id of ids) {
+    const input = $(`[data-paff="${id}"]`, main);
+    const raw = input ? input.value : S.affiliateDrafts[id];
+    if (raw == null) {
+      if (affiliateSaves.has(id)) await affiliateSaves.get(id).promise;
+      continue;
+    }
+    const val = raw.trim();
+    const item = products.find(x => x.id === id);
+    if (affiliateSaves.has(id) || !item || (item.affiliate_url || "") !== val) {
+      try {
+        await saveAffiliate(id, val);
+      } catch (e) {
+        input?.focus();
+        throw new Error(`O link de afiliado não foi salvo. Corrija ou tente novamente antes de produzir. ${e.message}`);
+      }
+    }
+  }
+}
+
+async function startProductVideo(ids, draftOnly = false) {
+  if (_jobLaunchBusy) return;
+  _jobLaunchBusy = true;
+  try {
+    await flushAffiliateInputs(ids);
+    S.form.style = "product";
+    saveForm();
+    if (location.hash !== "#create") location.hash = "#create";
+    if (S.view !== "create") route();
+  } catch (e) { toast(esc(e.message), "bad"); return; }
+  finally { _jobLaunchBusy = false; }
+  const extra = { product_ids: ids, style: "product", topic: "", url: "", source: "" };
+  if (draftOnly) await startDraft(extra);
+  else await startMake(extra);
+}
+
+async function queueProductIdea(ids) {
+  if (_jobLaunchBusy) return;
+  _jobLaunchBusy = true;
+  try {
+    await flushAffiliateInputs(ids);
+    await post("/api/ideas", { product_ids: ids, style: "product" });
+    toast("Produto(s) adicionado(s) na fila de Ideas!", "ok");
+    refreshInfo();
+  } catch (e) { toast(esc(e.message), "bad"); }
+  finally { _jobLaunchBusy = false; }
+}
+
 // ------------------------------------------------------------------ CLIP
 function viewClip() {
   const c = Object.assign({ source: "", count: 3, crop: "center", upload: false,
@@ -800,10 +1307,10 @@ function viewClip() {
   $("#c-model").oninput = e => { c.model = e.target.value; save(); };
   $("#c-transcription-model").oninput = e => { c.transcription_model = e.target.value; save(); };
   $("#c-up").onchange = e => { c.upload = e.target.checked; save(); };
-  $("#main").addEventListener("click", e => {
+  $("#main").onclick = e => {
     const b = e.target.closest("[data-seg=crop]");
     if (b) { c.crop = b.dataset.v; $$("[data-seg=crop]").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.v === c.crop))); save(); }
-  });
+  };
   $("#c-go").onclick = async () => {
     if (!c.source.trim()) return toast("Give a video file path or URL.", "bad");
     try { await post("/api/clip", { source: c.source.trim(), count: c.count, crop: c.crop, upload: c.upload, speed: c.speed,
