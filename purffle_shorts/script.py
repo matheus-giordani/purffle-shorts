@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import random
 import re
 from dataclasses import asdict, dataclass, field, fields
@@ -44,9 +45,9 @@ STYLES = {
     "reddit": "A first-person story told like a viral Reddit post (a confession, an 'am I wrong?' or a 'today I "
               "messed up'). Scene 1 is the post's title, read aloud; the rest is the story in casual first "
               "person, building to a twist or an update at the end.",
-    "product": "Product showcase: present 3-5 viral, useful products ('achadinhos' / top finds) — or one product "
-               "in depth when the subject is a single item — showing the problem each solves, how it works in "
-               "action, and why people want it.",
+    "product": "A curiosity-led product discovery: present 3-5 useful finds, or explore one specific item "
+               "in depth. Open a concrete question about its distinctive design or function, reveal how it "
+               "works through new details, and deliver a satisfying answer before the call to action.",
 }
 MULTI_SPEAKER = {"dialogue", "chat"}
 CARD_STYLES = {"reddit"}                  # single narrator, but the cast names the community and the poster
@@ -69,6 +70,9 @@ SCENE_SCHEMA = {
         "search_query": {"type": "string"},
         "image_prompt": {"type": "string"},
         "product": {"type": "string"},
+        "media_index": {"type": "integer"},
+        "focus_x": {"type": "number", "minimum": 0, "maximum": 1},
+        "focus_y": {"type": "number", "minimum": 0, "maximum": 1},
     },
     "required": ["speaker", "narration", "search_query", "image_prompt"],
     "additionalProperties": False,
@@ -109,6 +113,43 @@ SCORE_SCHEMA = {
 }
 
 WORDS_PER_SECOND = 2.6
+SEARCH_QUERY_RULE = (
+    "2-3 literal, physical English nouns/verbs that exist on stock video sites (e.g. \"writing in notebook\", "
+    "\"spilling coffee cup\", \"laptop code screen\"). NEVER use metaphors, decades (\"1960s\"), or ambiguous "
+    "words like \"stream\" (returns rivers) or \"tracking\" (returns drones)."
+)
+HOOK_MAX_CHARS = 62  # hook_png auto-fits the font over up to 3 lines
+# Words that must never be left dangling at the end of an on-screen hook (PT / EN / ES).
+_DANGLING_WORDS = {
+    "o", "a", "os", "as", "um", "uma", "uns", "umas", "de", "do", "da", "dos", "das", "no", "na", "nos", "nas",
+    "em", "por", "pelo", "pela", "para", "pra", "com", "sem", "que", "e", "ou", "se", "ao", "à", "seu", "sua",
+    "the", "an", "of", "to", "in", "on", "for", "with", "and", "or", "your", "my", "at", "by",
+    "el", "la", "los", "las", "un", "una", "y", "del", "al", "con", "en",
+}
+
+
+def _strip_dangling(text: str) -> str:
+    words = text.split()
+    while len(words) > 1 and words[-1].lower().strip(" ,.;:-–—") in _DANGLING_WORDS:
+        words.pop()
+    return " ".join(words).rstrip(" ,;:-–—")
+
+
+def _clean_hook_text(raw_hook: str, fallback_title: str) -> str:
+    """On-screen hook: up to HOOK_MAX_CHARS, cut on a sentence or word boundary, never ending on a loose
+    article / preposition ("COMO NÃO PERDER O")."""
+    hook = re.sub(r"[<>\"“”]", "", strip_emoji(str(raw_hook or ""))).strip()
+    hook = re.sub(r"\s+", " ", hook)
+    fallback = _strip_dangling(truncate_words(str(fallback_title or "").strip(), 40))
+    if not hook:
+        return fallback
+    if len(hook) <= HOOK_MAX_CHARS:
+        return _strip_dangling(hook) or fallback
+    head = hook[:HOOK_MAX_CHARS + 1]
+    ends = [m.end() for m in re.finditer(r"[.!?…](?=\s)", head)]
+    if ends and ends[-1] >= HOOK_MAX_CHARS * 0.5:
+        return _strip_dangling(head[:ends[-1]].strip()) or fallback
+    return _strip_dangling(truncate_words(hook, HOOK_MAX_CHARS)) or fallback
 
 
 @dataclass
@@ -118,6 +159,9 @@ class Scene:
     image_prompt: str = ""
     speaker: str = "A"
     product: str = ""
+    media_index: int = -1             # product photo/video for this scene ([media_index=N] in the dossier); -1 = auto
+    focus_x: float = 0.5              # visible subject center in the source image, normalized from left to right
+    focus_y: float = 0.5              # visible subject center in the source image, normalized from top to bottom
 
 
 @dataclass
@@ -211,14 +255,48 @@ def _format_rules(style: str) -> str:
                 "showcase 3-5 distinct useful products: open with a scroll-stopping hook, then give each product "
                 "1-2 scenes showing the problem it solves, how it works in action, and its best benefit. "
                 "If the subject is ONE specific product (or from a product page), dedicate all scenes to that "
-                "single product: hook with the problem it solves, demonstrate its best features step by step, "
-                "and end with why it is worth it.\n"
+                "single product: start with a specific curiosity about its shape, mechanism, or unexpected use. "
+                "Build toward the answer with a new detail in every scene. A daily pain point is optional, "
+                "not mandatory: do not replace an interesting product question with a generic complaint.\n"
+                "- Write a discovery, not a catalog: connect what is unusual, how it normally works, and why "
+                "that matters. Answer the opening question before the CTA. Avoid filler like 'look at this', "
+                "repeated aesthetic praise, price pitches, or lists of weight and dimensions. Include a spec "
+                "only when it explains the feature or changes a real buying decision.\n"
+                "- Do not pad a single-product story with scenes that only repeat 'wood', 'decoration', "
+                "'compact', or 'shows the date'. Each scene must advance the explanation. If the evidence "
+                "is limited, write a tighter story instead of stretching it to the word target.\n"
+                "- If the source only lists capabilities, build curiosity around an extra function, not an "
+                "unexplained internal mechanism. The answer must resolve the exact question you asked.\n"
                 "- Set each scene's \"product\" field to the short product name in the video's language for script "
                 "organization (max 5 words, e.g. \"Waterproof Outlet Cover\", \"Thermal Hair Brush\", or the product "
                 "name for a single-product spotlight; use \"\" on a pure intro or outro scene with no product shown). "
                 "This field is not displayed as an on-screen label.\n"
                 "- cast: list of the featured product names (1 to 5 items).\n"
-                "- search_query and image_prompt must describe close-up product demonstration or hands-on use.\n"
+                "- Show the featured product from the opening. search_query and image_prompt must describe "
+                "its real available photos or clips, with close-ups of the relevant detail.\n"
+                "- Match the narration to the real footage: when the background says a product only has static "
+                "catalog photos (no video clips), highlight visible details, features and benefits that the photos "
+                "can show. You may explain how the product is normally used when the source supports it; "
+                "do not invent a mechanism or claim a moving demonstration is playing. Avoid repeatedly "
+                "saying 'in the photo': narrate naturally over close-ups.\n"
+                "- Keep scene 1 to one short question or surprising observation. Reveal the answer "
+                "progressively; do not explain the whole product in the hook.\n"
+                "- hook_text is a separate, compact question of 3-5 words, not a copy of the full narration. "
+                "For example, 'Por que tantos anéis?' keeps the product visible under the title.\n"
+                "- When labeled product photos are attached, inspect them: use visible parts, readable labels, "
+                "and photographed handling as evidence. Choose media_index by what the photo actually shows. "
+                "Keep measurement charts and text-heavy promotional photos out unless essential. A still photo "
+                "of a hand adjusting a part supports describing that adjustment, not inventing unseen steps.\n"
+                "- Ignore photos of unrelated recommendations even if they appear in the gallery. Reuse a "
+                "correct product photo for two details rather than switching to an unrelated item.\n"
+                "- Ask only a question that the supplied text or photos can actually answer. Never finish "
+                "with a restatement like 'the answer is: it is a functional calendar'.\n"
+                "- media_index: when the background lists the product's media as [media_index=N], set the N that "
+                "best fits that scene (specs/size charts only for scenes about measurements); use -1 to let the "
+                "editor choose.\n"
+                "- focus_x and focus_y: normalized center of the featured product or the detail being discussed "
+                "in the selected photo (0 = left/top, 1 = right/bottom, 0.5 = center). The photo fills a vertical "
+                "frame: keep the product visible, especially when it sits near an edge.\n"
                 "- End with a short call to action asking which one the viewer would buy or pointing to the link.\n")
     return "- speaker is always \"A\" (one narrator). cast: [\"Narrator\"].\n"
 
@@ -236,12 +314,17 @@ def build_prompt(subject: str, style: str, settings: Settings, avoid: list[str],
         avoid_block = "Do NOT repeat any of these recent videos:\n" + "\n".join(f"- {a}" for a in avoid[:40]) + "\n\n"
     ctx = f"Background information (use it, don't invent beyond it):\n{context.strip()}\n\n" if context else ""
     ins = f"{insights.strip()}\n\n" if insights else ""
-    scene_fields = "{speaker, narration, search_query, image_prompt, product}" if style == "product" \
+    scene_fields = "{speaker, narration, search_query, image_prompt, product, media_index, focus_x, focus_y}" if style == "product" \
         else "{speaker, narration, search_query, image_prompt}"
+    subject_rule = ("Keep the supplied product selection and do not invent extra products." if style == "product" else
+                    "If the subject is broad, choose ONE specific, surprising, lesser-known topic inside it.")
+    image_rule = ("describe the selected real product photo or clip and the relevant visible detail; do not invent "
+                  "a new demonstration." if style == "product" else
+                  "one vivid English sentence for an AI image of that scene, no text or letters in the image.")
     user = f"""Write one YouTube Short.
 
 Subject: {subject}
-If the subject is broad, choose ONE specific, surprising, lesser-known topic inside it.
+{subject_rule}
 Format: {STYLES[style]}
 Audience: {settings.audience}
 Language: {lang} for narration, title, hook_text, cast and description. search_query and image_prompt are ALWAYS English.
@@ -252,8 +335,8 @@ Language: {lang} for narration, title, hook_text, cast and description. search_q
 - Every line earns its place: concrete details, numbers, names. Only well-established facts; no made-up statistics.
 - The last scene lands the payoff, then a short call to action (max 8 words), e.g. asking viewers to comment or follow.
 - Narration is spoken by a voice: no emojis, hashtags, labels, brackets or stage directions.
-- search_query: 1-4 English words describing concrete, filmable stock footage for that scene (e.g. "octopus underwater", "old library books"). No abstract words.
-- image_prompt: one vivid English sentence for an AI image of that scene, no text or letters in the image.
+- search_query: {SEARCH_QUERY_RULE}
+- image_prompt: {image_rule}
 - title: max 60 characters, curiosity-driven but honest, no hashtags, no quotes.
 - hook_text: max 6 words shown on screen during the first seconds.
 - description: 2-3 sentences plus one question that invites comments. No hashtags.
@@ -297,10 +380,21 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
             continue
         query = _clean_tag(s.get("search_query") or "") or subject
         product = truncate_words(_clean_tag(s.get("product") or ""), 36) if style == "product" else ""
+        try:
+            media_index = int(s.get("media_index", -1)) if style == "product" else -1
+        except (TypeError, ValueError):
+            media_index = -1
+        focus = {}
+        for axis in ("focus_x", "focus_y"):
+            try:
+                value = float(s.get(axis, 0.5)) if style == "product" else 0.5
+            except (TypeError, ValueError):
+                value = 0.5
+            focus[axis] = max(0.0, min(1.0, value)) if math.isfinite(value) else 0.5
         scenes.append(Scene(narration=narration, search_query=truncate_words(query, 60),
                             image_prompt=str(s.get("image_prompt") or query).strip(),
                             speaker=_speaker(s.get("speaker")) if multi else "A",
-                            product=product))
+                            product=product, media_index=max(-1, min(media_index, 63)), **focus))
     if not scenes:
         raise ValueError("script has no narration")
     limit = 20 if style == "chat" else 12
@@ -322,8 +416,7 @@ def normalize(data: dict, subject: str, style: str, language: str) -> Script:
     title = re.sub(r"[<>\"“”]", "", title).strip(" '-:")
     title = truncate_words(title or subject.title(), 90)
 
-    hook = re.sub(r"[<>\"“”]", "", strip_emoji(str(data.get("hook_text") or ""))).strip()
-    hook = truncate_words(hook, 48) if hook else truncate_words(title, 40)
+    hook = _clean_hook_text(str(data.get("hook_text") or ""), title)
 
     hashtags, seen = ["#shorts"], {"#shorts"}
     for h in data.get("hashtags") or []:
@@ -406,13 +499,13 @@ def word_count(text: str, language: str = "en") -> int:
 @usage.stage("script")
 def write_script(llm, subject: str, settings: Settings, *, source: str = "niche",
                  avoid: list[str] | None = None, context: str = "", style: str | None = None,
-                 insights: str = "") -> Script:
+                 insights: str = "", images: list[tuple[str, str]] | None = None) -> Script:
     style = STYLE_ALIASES.get(style or "", style)
     style = style if style in STYLES else pick_style(settings, source)
     if llm is None:
         return offline_script(subject, settings, style)
     system, user = build_prompt(subject, style, settings, avoid or [], context, insights)
-    data = llm.complete_json(system, user, SCRIPT_SCHEMA)
+    data = llm.complete_json(system, user, SCRIPT_SCHEMA, **({"images": images} if images else {}))
     script = normalize(data, subject, style, settings.language)
     log.info("Script (%s, %d words, %d scenes): %s", style, word_count(script.narration, settings.language),
              len(script.scenes), script.title)
@@ -430,14 +523,16 @@ def review_prompt(script: Script, settings: Settings, rewrite: bool, context: st
     system = ("You are a ruthless YouTube Shorts retention editor. You know that viewers decide in 1-2 "
               "seconds and swipe away at any slow moment. You reply with a single JSON object and nothing else.")
     ctx_block = (
-        f"\nVerified source facts & product dossier (treat all specs, materials, dimensions and features "
-        f"below as verified truth — do NOT penalize or remove them as unverified claims):\n{context[:2500]}\n"
+        f"\nVerified source facts & product dossier (use only the stated facts and available media; "
+        f"do not invent mechanisms, demonstrations, or benefits):\n{context[:6000 if script.style == 'product' else 2500]}\n"
         if context else ""
     )
     criteria = (
-        "hook strength in the first 2 seconds (does it immediately name a relatable daily pain point or "
-        "scroll-stopping product surprise?), clarity of practical demonstration in each scene (concrete "
-        "problem-solving action over generic praise), pacing, and engagement CTA at the end."
+        "a specific curiosity about this product in the first 2 seconds, progressive discovery with a new "
+        "detail in each scene, a clear answer to the opening question, factual accuracy, fit to available "
+        "photos or clips, natural spoken language, pacing, and a brief CTA. Preserve a strong curiosity "
+        "hook; do not force a daily pain point or turn the rewrite into a catalog of specs and prices. "
+        "A static-photo video can explain a verified mechanism without pretending to show live motion."
         if script.style == "product" else
         "hook strength in the first 2 seconds (most important), curiosity gaps, pacing, specificity, "
         "payoff, and accuracy risk."
@@ -446,9 +541,15 @@ def review_prompt(script: Script, settings: Settings, rewrite: bool, context: st
 the same JSON structure and about {words} words in about {n_scenes} scenes. Fix every issue you listed:
 sharpen the hook, cut filler, make vague lines concrete, remove any claim that may not be true, keep the
 payoff for the end, end with a short call to action. Put the rewritten script in "script".
+Every search_query must stay literal and filmable: {SEARCH_QUERY_RULE}
 Format rules to keep:
 {_format_rules(script.style)}""" if rewrite else
             'Return only "score" and "issues".')
+    if rewrite and script.style == "product":
+        task += ("\nIf you remove an unsupported mechanism, change the hook as well. Do not ask how a device "
+                 "performs a task and then answer only that it has that function. For a source that confirms "
+                 "wet pickup and blowing but no internal engineering, 'What else can it do besides vacuuming "
+                 "dust?' is answerable; 'How does it suck water without damaging the motor?' is not.")
     user = f"""Review this YouTube Short script ({STYLES[script.style]}).
 {ctx_block}
 {json.dumps(draft, ensure_ascii=False, indent=1)}
@@ -460,7 +561,8 @@ List the concrete problems in "issues" (max 5, short sentences, most important f
 
 
 @usage.stage("review")
-def review_script(llm, script: Script, settings: Settings, context: str = "") -> Script:
+def review_script(llm, script: Script, settings: Settings, context: str = "",
+                  images: list[tuple[str, str]] | None = None) -> Script:
     """Score the script and (in rewrite mode) replace it with the improved version. Never fails the video:
     if the review call or its rewrite is unusable, the original script is kept."""
     mode = settings.script_review
@@ -469,7 +571,8 @@ def review_script(llm, script: Script, settings: Settings, context: str = "") ->
     rewrite = mode == "rewrite"
     system, user = review_prompt(script, settings, rewrite, context=context)
     try:
-        data = llm.complete_json(system, user, REVIEW_SCHEMA if rewrite else SCORE_SCHEMA, max_tokens=5000)
+        data = llm.complete_json(system, user, REVIEW_SCHEMA if rewrite else SCORE_SCHEMA, max_tokens=5000,
+                                 **({"images": images} if images else {}))
     except Exception as e:
         log.warning("Script Doctor skipped: %s", e)
         return script
@@ -525,6 +628,7 @@ Return the same JSON structure."""
         raise ValueError(f"translation to {language} has {len(out.scenes)} scenes, expected {len(script.scenes)}")
     for mine, theirs in zip(out.scenes, script.scenes):
         mine.search_query, mine.image_prompt, mine.speaker = theirs.search_query, theirs.image_prompt, theirs.speaker
+        mine.media_index = theirs.media_index
         if not theirs.product:
             mine.product = ""
         elif not mine.product:

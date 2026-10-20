@@ -372,9 +372,11 @@ LLM_MODEL_SCRIPT=google/gemini-3.8-flash
 LLM_MODEL_REVIEW=openai/gpt-6-luna
 LLM_MODEL_TRANSLATION=google/gemini-3.8-flash
 LLM_MODEL_CLIP=openai/gpt-6-luna
+OPENROUTER_REASONING_EFFORT=medium
 ```
 
 The Studio's **AI & publishing → Choose a model for each stage** fields can override these per video. The Ideas page uses the planner selection, and the Clip page has its own clip selection and optional OpenRouter transcription model.
+`OPENROUTER_REASONING_EFFORT` sets the effort for OpenRouter reasoning models such as `openai/gpt-6-luna`; valid values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max`.
 
 | Provider | `LLM_PROVIDER` | Key | Default model |
 |---|---|---|---|
@@ -405,13 +407,14 @@ The Studio's **AI & publishing → Choose a model for each stage** fields can ov
 |---|---|---|---|
 | Microsoft neural voices (edge-tts) | `edge` *(default)* | Free, no key | Native |
 | OpenAI `gpt-4o-mini-tts` / `tts-1-hd` | `openai` | Paid | Aligned or estimated |
-| OpenRouter TTS models (default `google/gemini-3.8-flash-tts`) | `openrouter` | Paid, `OPENROUTER_API_KEY` | Aligned or estimated |
+| OpenRouter TTS models, including ElevenLabs (`elevenlabs/eleven-v4`) | `openrouter` | Paid, `OPENROUTER_API_KEY` | Aligned or estimated |
 | ElevenLabs | `elevenlabs` | Paid | Native |
 | Kokoro-82M (open weights, local) | `kokoro` | Free, `pip install kokoro soundfile` | Aligned or estimated |
 | Coqui TTS (local) | `coqui` | Free, `pip install coqui-tts` | Aligned or estimated |
 | OS voice (`say` / espeak-ng / SAPI) | `system` | Free, offline | Estimated |
 
 - `python -m purffle_shorts voices --lang en` lists the free voices for a language (322 voices in 75 languages when checked; try `--lang es`, `--lang hi` and so on). Set `TTS_VOICE=en-US-GuyNeural`, or a comma list to rotate voices between videos.
+- For ElevenLabs through OpenRouter, set `TTS_ENGINE=openrouter`, `TTS_MODEL=elevenlabs/eleven-v4`, and optionally `TTS_VOICE=george`. This uses `OPENROUTER_API_KEY`; direct `TTS_ENGINE=elevenlabs` still uses `ELEVENLABS_API_KEY`.
 - `LANGUAGE=es` (or `hi`, `ta`, `fr`, `pt`, `ja`, …) switches the script, the voice and the caption font together. Tamil, Hindi, Arabic, Thai and similar scripts are rendered through libass so they are shaped correctly.
 - `pip install faster-whisper` gives precise word timing for engines without native timestamps (`ALIGN=auto`).
 - The second speaker in dialogues and chats uses `TTS_VOICE_B`, or a contrasting voice picked for the language.

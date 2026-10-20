@@ -5,7 +5,7 @@ import pytest
 
 from purffle_shorts.config import Settings
 from purffle_shorts.llm import extract_json
-from purffle_shorts.script import SCRIPT_SCHEMA, build_prompt, load_script, normalize, offline_script
+from purffle_shorts.script import SCRIPT_SCHEMA, _clean_hook_text, build_prompt, load_script, normalize, offline_script
 
 
 @pytest.mark.parametrize("text", [
@@ -58,6 +58,21 @@ def test_prompt_mentions_language_and_length():
     assert "Spanish" in user and "78 words" in user and "Old title" in user
     assert "JSON" in system
     assert set(SCRIPT_SCHEMA["required"]) >= {"title", "scenes", "hashtags"}
+
+
+def test_hook_text_does_not_end_with_dangling_word():
+    hook = "Um clique. Vários serviços. Como não perder o rastro?"
+    assert _clean_hook_text(hook, "Título") == hook
+    assert not _clean_hook_text("Um clique. Vários serviços. Como não perder o", "Título").lower().endswith(" o")
+
+
+@pytest.mark.parametrize("x,y,expected", [(1.8, -0.2, (1.0, 0.0)),
+                                         ("invalid", None, (0.5, 0.5)),
+                                         (float("nan"), float("inf"), (0.5, 0.5))])
+def test_product_focus_is_safe_for_rendering(x, y, expected):
+    script = normalize({"scenes": [{"narration": "Look at the product.", "focus_x": x, "focus_y": y}]},
+                       "product", "product", "en")
+    assert (script.scenes[0].focus_x, script.scenes[0].focus_y) == expected
 
 
 def test_load_script_cleans_like_an_ai_script(tmp_path):

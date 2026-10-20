@@ -119,6 +119,7 @@ class Settings:
     llm_fallbacks: list[str] = field(default_factory=list)
     llm_temperature: float = 0.9
     anthropic_effort: str = ""        # low|medium|high|xhigh|max (blank = API default)
+    openrouter_reasoning_effort: str = "medium"
     script_review: str = "rewrite"    # off|score|rewrite — the Script Doctor's second pass
     learn_from_stats: bool = False    # show the LLM which of your videos got the most / fewest views
 
@@ -140,6 +141,7 @@ class Settings:
     clip_transcription_model: str = ""
     visual_style: str = "cinematic, dramatic lighting, highly detailed, vertical composition"
     prefer_4k: bool = False
+    ai_image_fallback: bool = True    # AI image (OpenRouter/OpenAI key) when no stock clip really matches a scene
 
     # --- render ---------------------------------------------------------------------------
     resolution: tuple[int, int] = (1080, 1920)
@@ -267,6 +269,9 @@ class Settings:
                 raise ConfigError(f"ASPECT={aspect!r}: choose one of {', '.join(ASPECTS)}")
             if not _env("RESOLUTION", "", "SHORTS_RESOLUTION"):
                 resolution = preset
+        reasoning_effort = _env("OPENROUTER_REASONING_EFFORT", d.openrouter_reasoning_effort).lower()
+        if reasoning_effort not in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise ConfigError("OPENROUTER_REASONING_EFFORT must be none, minimal, low, medium, high, xhigh, or max")
         s = cls(
             niches=_list(_env("NICHES")) or list(DEFAULT_NICHES),
             topic_sources=_list(_env("TOPIC_SOURCES", "niche")) or ["niche"],
@@ -291,6 +296,7 @@ class Settings:
             llm_fallbacks=[p.lower() for p in _list(_env("LLM_FALLBACKS"))],
             llm_temperature=_float("LLM_TEMPERATURE", d.llm_temperature),
             anthropic_effort=_env("ANTHROPIC_EFFORT").lower(),
+            openrouter_reasoning_effort=reasoning_effort,
             script_review=_env("SCRIPT_REVIEW", d.script_review).lower(),
             learn_from_stats=_bool(_env("LEARN_FROM_STATS", "false")),
             tts_engine=_env("TTS_ENGINE", d.tts_engine).lower(),
@@ -308,6 +314,7 @@ class Settings:
             clip_transcription_model=_env("CLIP_TRANSCRIPTION_MODEL"),
             visual_style=_env("VISUAL_STYLE", d.visual_style),
             prefer_4k=_bool(_env("PREFER_4K", "false")),
+            ai_image_fallback=_bool(_env("AI_IMAGE_FALLBACK", "true")),
             resolution=resolution,
             fps=max(1, _int("FPS", d.fps, "SHORTS_FPS")),
             video_speed=_float("VIDEO_SPEED", d.video_speed),

@@ -221,14 +221,26 @@ class Studio:
         try:
             self._step("script", pick.subject)
             insights = analytics.insights(self.history) if s.learn_from_stats else ""
+            photos = []
+            if pick.style == "product" or style == "product":
+                from .products import _product_media_catalog
+                products = prods if product_ids else [
+                    {"title": pick.subject, "images": pick.images, "videos": pick.videos}
+                ]
+                for product in products:
+                    catalog = _product_media_catalog(product, image_limit=4 if len(products) > 1 else 8)
+                    photos.extend((f"{product['title']} [media_index={index}]", media_url)
+                                  for index, (media_url, meta) in enumerate(catalog) if meta["kind"] == "image")
             writer_llm = self.llm_for_stage("script")
             script = write_script(writer_llm, pick.subject, s, source=pick.source, avoid=self.history.recent_titles(),
-                                  context=pick.context, style=style or pick.style or None, insights=insights)
+                                  context=pick.context, style=style or pick.style or None, insights=insights,
+                                  **({"images": photos} if photos else {}))
             if pick.product_links and not script.product_links:
                 script.product_links = list(pick.product_links)
             if writer_llm is not None and s.script_review != "off":
                 self._step("review", "Script Doctor")
-                script = review_script(self.llm_for_stage("review"), script, s, context=pick.context)
+                script = review_script(self.llm_for_stage("review"), script, s, context=pick.context,
+                                       **({"images": photos} if photos else {}))
         except BaseException:
             if pick.idea_id:
                 self.history.release_idea(pick.idea_id)
@@ -324,6 +336,10 @@ class Studio:
                     prods = self.history.get_products(pick.product_ids)
                     if prods:
                         scene_media = build_scene_media_for_products(prods, script.scenes, timeline, offline=s.offline)
+                elif script.style == "product" and (pick.images or pick.videos):
+                    from .products import build_scene_media_for_products
+                    product = {"title": pick.subject, "images": pick.images, "videos": pick.videos}
+                    scene_media = build_scene_media_for_products([product], script.scenes, timeline, offline=s.offline)
                 is_prod = script.style == "product" or bool(pick.product_ids) or pick.source == "products"
                 visuals = Visuals(s, self.history.used_media(), extra_images=pick.images, extra_videos=pick.videos,
                                   repeat_extra=is_prod, scene_media=scene_media)
@@ -351,7 +367,8 @@ class Studio:
                 if s.caption_position == "center":
                     overlay_s = replace(s, caption_position="lower")
             plan = build_overlays(overlay_s, on_screen, total, script.hook_text, work, labels=labels, chat=messages,
-                                  contact=script.speaker_name("A"), card=card, card_until=card_until)
+                                  contact=script.speaker_name("A"), card=card, card_until=card_until,
+                                  style_name=script.style)
 
             self._step("render", f"{s.width}x{s.height}")
             video = folder / ("short.mp4" if s.vertical else "video.mp4")

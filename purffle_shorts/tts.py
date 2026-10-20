@@ -3,6 +3,7 @@ provides them, otherwise from an aligner or an estimate) so captions land exactl
 
   edge        Microsoft neural voices — free, no key, 320+ voices in 75 languages, native word timings (default)
   openai      OpenAI gpt-4o-mini-tts / tts-1-hd (OPENAI_API_KEY)
+  openrouter  OpenRouter speech models, including Gemini and ElevenLabs (OPENROUTER_API_KEY)
   elevenlabs  ElevenLabs premium voices, native timings (ELEVENLABS_API_KEY)
   kokoro      Kokoro-82M open-weight model, runs locally (pip install kokoro soundfile)
   coqui       Coqui TTS models, runs locally (pip install coqui-tts)
@@ -142,20 +143,33 @@ def _openrouter(text: str, out: Path, settings: Settings) -> tuple[Path, list[Wo
     if not settings.openrouter_api_key:
         raise PermanentError("TTS_ENGINE=openrouter needs OPENROUTER_API_KEY")
     model = settings.tts_model or "google/gemini-3.8-flash-tts"
-    voice = _pick_voice(settings, "Kore")
-    path = out / "voice.mp3"
+    is_elevenlabs = model.startswith("elevenlabs/")
+    is_gemini = model.startswith("google/")
+    voice = _pick_voice(settings, "george" if is_elevenlabs else "Kore")
+    response_format = "pcm" if is_gemini else "mp3"
+    path = out / ("voice.wav" if is_gemini else "voice.mp3")
+    body = {"model": model, "input": text, "voice": voice, "response_format": response_format}
+    if not is_elevenlabs:
+        body["instructions"] = settings.tts_instructions
     with usage.request("openrouter", model, characters=len(text)) as call:
         r = http().post("https://openrouter.ai/api/v1/audio/speech", timeout=180,
                         headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
                                  "HTTP-Referer": "https://github.com/Chamanrajragu/purffle-shorts",
                                  "X-Title": "PurffleShorts"},
-                        json={"model": model, "input": text, "voice": voice,
-                              "instructions": settings.tts_instructions, "response_format": "mp3"})
+                        json=body)
         call.capture(r, {})
         raise_for_status(r, "OpenRouter TTS")
         if not r.content:
             raise RuntimeError("OpenRouter TTS returned empty audio")
-        path.write_bytes(r.content)
+        if is_gemini:
+            # Gemini returns raw 16-bit PCM (24 kHz, mono); add a WAV header for media probing.
+            with wave.open(str(path), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(24000)
+                wav_file.writeframes(r.content)
+        else:
+            path.write_bytes(r.content)
     return path, [], voice
 
 
@@ -364,6 +378,8 @@ def second_voice(settings: Settings) -> str:
     engine = settings.tts_engine
     if engine == "edge":
         return EDGE_VOICES_B.get(settings.language.split("-")[0], EDGE_VOICES_B["en"])
+    if engine == "openrouter" and settings.tts_model.startswith("elevenlabs/"):
+        return "sarah"
     return SECOND_VOICE.get(engine, "")
 
 

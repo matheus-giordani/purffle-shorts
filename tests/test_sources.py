@@ -162,5 +162,7 @@ def test_product_url_extracts_metadata_and_images(monkeypatch):
     assert t.style == "product" and t.subject == "Waterproof Outlet Cover Box"
     assert "SafeHome" in t.context and "USD 12.99" in t.context and "4.8/5" in t.context
     assert "90-degree flip cover" in t.context
+    assert "static catalog photos (no video clips)" in t.context
+    assert "[media_index=1] image (detail): outlet-2.jpg" in t.context
     assert t.images == ["https://cdn.example.com/outlet-1.jpg", "https://cdn.example.com/outlet-2.jpg"]
 

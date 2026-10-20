@@ -11,6 +11,8 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageOps
+
 from . import ffmpeg
 from .config import Settings
 from .media import MediaItem
@@ -54,12 +56,58 @@ def _encode_args(settings: Settings, final: bool) -> list[str]:
             "-pix_fmt", "yuv420p", "-g", str(settings.fps * 2)]
 
 
+def _compose_vertical_product_canvas(src_path: Path, W: int, H: int, idx: int, work: Path) -> Path:
+    """Fit a full catalog photo over a darkened, blurred copy for vertical video."""
+    with Image.open(src_path) as source:
+        photo = ImageOps.exif_transpose(source).convert("RGB")
+    if photo.height >= photo.width * 1.35:
+        return src_path
+
+    # Trim large white catalogue margins but retain a clear border around the item.
+    difference = ImageChops.difference(photo, Image.new("RGB", photo.size, "white")).convert("L")
+    bbox = difference.point(lambda value: 255 if value > 22 else 0).getbbox()
+    if bbox:
+        left, top, right, bottom = bbox
+        area = max(1, (right - left) * (bottom - top))
+        if area < photo.width * photo.height * 0.94:
+            pad = int(max(photo.width, photo.height) * 0.06)
+            photo = photo.crop((max(0, left - pad), max(0, top - pad),
+                                min(photo.width, right + pad), min(photo.height, bottom + pad)))
+
+    background = ImageOps.fit(photo, (W, H), method=Image.Resampling.LANCZOS)
+    background = ImageEnhance.Brightness(background.filter(ImageFilter.GaussianBlur(radius=max(1, round(W * 38 / 1080))))).enhance(0.65)
+
+    max_size = (max(1, int(W * 0.92)), max(1, int(H * 0.62)))
+    photo.thumbnail(max_size, Image.Resampling.LANCZOS)
+    x = (W - photo.width) // 2
+    y_center = int(H * 0.46)
+    y = min(max(0, y_center - photo.height // 2), H - photo.height)
+    radius = max(2, round(W * 24 / 1080))
+    mask = Image.new("L", photo.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, photo.width - 1, photo.height - 1), radius=radius, fill=255)
+
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rounded_rectangle((x + 6, y + 10, x + photo.width + 6, y + photo.height + 10),
+                                  radius=radius, fill=(0, 0, 0, 100))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=max(1, round(W * 18 / 1080))))
+    canvas = background.convert("RGBA")
+    canvas.alpha_composite(shadow)
+    canvas.paste(photo, (x, y), mask)
+    dest = work / f"framed{idx:02d}.jpg"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    canvas.convert("RGB").save(dest, quality=95)
+    return dest
+
+
 def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Settings, work: Path) -> Path:
     W, H, F = settings.width, settings.height, settings.fps
     out = work / f"seg{idx:02d}.mp4"
     seconds = max(seconds, 2.0 / F)
     frames = max(2, round(seconds * F))
-    cover = f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H},setsar=1"
+    focus_x, focus_y = item.extra.get("focus_x", 0.5), item.extra.get("focus_y", 0.5)
+    crop_position = f"x='max(0,min(iw-ow,iw*{focus_x}-ow/2))':y='max(0,min(ih-oh,ih*{focus_y}-oh/2))'"
+    cover = f"scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{H}:{crop_position},setsar=1"
     grade = _grade(settings)
     enc = _encode_args(settings, final=False)
 
@@ -80,17 +128,32 @@ def prepare_segment(item: MediaItem, seconds: float, idx: int, settings: Setting
         return out
 
     if item.kind == "image" and item.path:
+        image_path = item.path
+        smart_frame = False
+        if W < H and item.source != "product-page":
+            try:
+                with Image.open(item.path) as source:
+                    img_w, img_h = ImageOps.exif_transpose(source).size
+                if img_h < img_w * 1.35 and (item.source == "product-page" or img_w >= img_h * 0.82):
+                    image_path = _compose_vertical_product_canvas(item.path, W, H, idx, work)
+                    smart_frame = image_path != item.path
+            except (OSError, ValueError):
+                pass
         if settings.ken_burns:
             z = random.choice(["in", "out", "pan"])
-            zoom = {"in": f"min(1+0.16*on/{frames},1.16)", "out": f"1.16-0.16*on/{frames}", "pan": "1.12"}[z]
-            x = "(iw-iw/zoom)*on/" + str(frames) if z == "pan" else "iw/2-(iw/zoom/2)"
+            if smart_frame:
+                zoom = f"min(1+0.08*on/{frames},1.08)" if z != "out" else f"1.08-0.08*on/{frames}"
+                x = "iw/2-(iw/zoom/2)"
+            else:
+                zoom = {"in": f"min(1+0.16*on/{frames},1.16)", "out": f"1.16-0.16*on/{frames}", "pan": "1.12"}[z]
+                x = "(iw-iw/zoom)*on/" + str(frames) if z == "pan" else "iw/2-(iw/zoom/2)"
             y = "ih/2-(ih/zoom/2)"
-            vf = (f"scale={2 * W}:{2 * H}:force_original_aspect_ratio=increase,crop={2 * W}:{2 * H},"
+            vf = (f"scale={2 * W}:{2 * H}:force_original_aspect_ratio=increase,crop={2 * W}:{2 * H}:{crop_position},"
                   f"zoompan=z='{zoom}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={F},setsar=1{grade}")
-            ffmpeg.run(["-i", str(item.path), "-vf", vf, *enc, "-frames:v", str(frames), str(out)],
+            ffmpeg.run(["-i", str(image_path), "-vf", vf, *enc, "-frames:v", str(frames), str(out)],
                        label=f"segment {idx} (ken burns)")
         else:
-            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-i", str(item.path), "-vf", f"{cover}{grade}",
+            ffmpeg.run(["-loop", "1", "-framerate", str(F), "-i", str(image_path), "-vf", f"{cover}{grade}",
                         *enc, "-frames:v", str(frames), str(out)], label=f"segment {idx} (still)")
         return out
 

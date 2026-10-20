@@ -84,10 +84,22 @@ def test_product_showcase_renders_without_badges(fast, spy_overlays):
     assert r.ok, r.error
     kw = spy_overlays[0]
     assert "badges" not in kw and not hasattr(kw["_plan"], "badges")
+    assert kw["style_name"] == "product"
     meta = json.loads((r.folder / "metadata.json").read_text())
     assert meta["style"] == "product" and len(meta["cast"]) == 3
     assert (r.folder / "captions.srt").read_text().strip()
     assert ffmpeg.probe(r.video)["duration"] > 15
+
+
+def test_end_cta_localizes_only_default(settings):
+    from purffle_shorts.overlays import localized_cta
+
+    default = settings.with_overrides(language="pt", end_cta="Follow for more!")
+    assert localized_cta(default) == "Siga para mais!"
+    assert localized_cta(default, "product") == "Link na descrição!"
+    assert localized_cta(default.with_overrides(language="es")) == "¡Síguenos para más!"
+    assert localized_cta(default.with_overrides(end_cta="Meu texto"), "product") == "Meu texto"
+    assert localized_cta(default.with_overrides(end_cta=""), "product") == ""
 
 
 @pytest.mark.parametrize("ass_renderer", [False, True])

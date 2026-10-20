@@ -94,6 +94,38 @@ def test_fallback_chain_uses_next_provider():
     assert chain.complete_json("s", "u") == {"ok": True}
 
 
+def test_product_photos_are_labeled_in_openrouter_request(monkeypatch):
+    session = FakeSession(_ok())
+    monkeypatch.setattr(L, "http", lambda: session)
+    chain = object.__new__(L.LLM)
+    chain.settings = Settings()
+    chain.providers = [L.OpenAICompatible(L.PRESETS["openrouter"], "vision-model", "k", "https://example/v1")]
+
+    assert chain.complete_json("s", "u", images=[("Calendar [media_index=2]", "https://cdn.example/ring.jpg")]) == {"x": 1}
+    content = session.calls[0]["json"]["messages"][1]["content"]
+    assert content == [{"type": "text", "text": "u"},
+                       {"type": "text", "text": "Calendar [media_index=2]"},
+                       {"type": "image_url", "image_url": {"url": "https://cdn.example/ring.jpg"}}]
+
+
+def test_product_photos_fall_back_to_text_for_a_model_without_vision(monkeypatch):
+    calls = []
+
+    class Session:
+        def post(self, url, json=None, **kwargs):
+            content = json["messages"][1]["content"]
+            calls.append(content)
+            return FakeResp(404, {"error": "No endpoints support image input"}) if isinstance(content, list) else _ok()
+
+    monkeypatch.setattr(L, "http", lambda: Session())
+    chain = object.__new__(L.LLM)
+    chain.settings = Settings()
+    chain.providers = [L.OpenAICompatible(L.PRESETS["openrouter"], "text-model", "k", "https://example/v1")]
+
+    assert chain.complete_json("s", "u", images=[("photo", "https://cdn.example/photo.jpg")]) == {"x": 1}
+    assert isinstance(calls[0], list) and calls[1] == "u"
+
+
 def _fake_anthropic(monkeypatch, captured):
     mod = types.ModuleType("anthropic")
 
@@ -141,6 +173,18 @@ def test_anthropic_other_models_use_plain_messages(monkeypatch):
     L.AnthropicProvider("claude-haiku-4-5", "key").complete("s", "u", schema={})
     kind, kw = captured[0]
     assert kind == "messages" and "fallbacks" not in kw and "output_config" not in kw
+
+
+def test_product_photos_use_native_anthropic_image_blocks(monkeypatch):
+    captured = []
+    _fake_anthropic(monkeypatch, captured)
+    chain = object.__new__(L.LLM)
+    chain.settings = Settings()
+    chain.providers = [L.AnthropicProvider("claude-haiku-4-5", "key")]
+
+    assert chain.complete_json("s", "u", images=[("photo", "https://cdn.example/photo.jpg")]) == {"a": 1}
+    content = captured[0][1]["messages"][0]["content"]
+    assert content[-1] == {"type": "image", "source": {"type": "url", "url": "https://cdn.example/photo.jpg"}}
 
 
 @pytest.mark.parametrize("host,url", [

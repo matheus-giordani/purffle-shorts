@@ -765,6 +765,32 @@ def post_card_png(settings: Settings, font_path: Path | None, community: str, us
 
 
 # ------------------------------------------------------------------------------------------ plan
+DEFAULT_END_CTA = "Follow for more!"
+DEFAULT_CTA_BY_LANG = {
+    "pt": "Siga para mais!",
+    "es": "¡Síguenos para más!",
+    "fr": "Abonnez-vous !",
+    "de": "Folge für mehr!",
+    "it": "Seguici per altri video!",
+    "en": DEFAULT_END_CTA,
+}
+PRODUCT_CTA_BY_LANG = {"pt": "Link na descrição!"}
+
+
+def localized_cta(settings: Settings, style: str = "") -> str:
+    """END_CTA for this video. The untouched English default follows the video's language (and points to the
+    link on Portuguese product videos); a custom END_CTA from .env is always kept as written."""
+    text = (settings.end_cta or "").strip()
+    if text != DEFAULT_END_CTA:
+        return text
+    lang = (settings.language or "en").split("-")[0].lower()
+    if lang == "en":
+        return text
+    if style == "product" and lang in PRODUCT_CTA_BY_LANG:
+        return PRODUCT_CTA_BY_LANG[lang]
+    return DEFAULT_CTA_BY_LANG.get(lang, text)
+
+
 @dataclass
 class OverlayPlan:
     mode: str                                  # pillow | ass
@@ -785,7 +811,7 @@ class OverlayPlan:
 def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_text: str, work: Path, *,
                    labels: dict[str, str] | None = None, chat: list[ChatMessage] | None = None,
                    contact: str = "", card: tuple[str, str, str] | None = None,
-                   card_until: float = 0.0) -> OverlayPlan:
+                   card_until: float = 0.0, style_name: str = "") -> OverlayPlan:
     """Render captions and optional overlays: speaker labels, chat screen or a Reddit-style post card."""
     style = CAPTION_STYLES.get(settings.caption_style, CAPTION_STYLES["bold"])
     if not settings.caption_uppercase and style.font == "anton":
@@ -793,7 +819,7 @@ def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_t
     font_path, family = resolve_font(settings, style.font)
     card = card if card and card_until > 0 else None
     hook_until = min(2.8, total * 0.4) if settings.hook_overlay and hook_text and not card else 0.0
-    cta_text = settings.end_cta.strip()
+    cta_text = localized_cta(settings, style_name)
     cta_from = max(total - 2.6, total * 0.6) if cta_text else 0.0
     hook_y = 0.09 if chat else 0.15
     chat_plan = None
@@ -830,7 +856,7 @@ def build_overlays(settings: Settings, chunks: list[Chunk], total: float, hook_t
     ui_font, _ = resolve_font(settings, "anton" if settings.caption_uppercase else "sans")
     if hook_until:
         plan.hook = hook_png(settings, ui_font, hook_text, work / "hook.png", y_ratio=hook_y,
-                             max_lines=2 if chat else 3)
+                             max_lines=2 if chat or style_name == "product" else 3)
         plan.hook_until = hook_until
     if settings.watermark_text:
         plan.watermark = watermark_png(settings, ui_font, settings.watermark_text, work / "watermark.png")

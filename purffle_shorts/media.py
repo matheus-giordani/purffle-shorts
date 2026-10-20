@@ -25,6 +25,28 @@ log = logging.getLogger("purffle")
 VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp"}
 STOP_WORDS = {"the", "a", "an", "of", "and", "in", "on", "with", "for", "to", "at", "by", "from", "closeup"}
+# Camera / framing words and vague modifiers: they say nothing about *what* is on screen.
+CAMERA_WORDS = {"closeup", "close", "up", "shot", "view", "scene", "footage", "video", "clip", "camera", "slow",
+                "motion", "macro", "aerial", "pov", "angle", "cinematic", "background", "detail", "detailed"}
+MODIFIER_WORDS = {"hands", "hand", "multiple", "same", "numbered", "digital", "single", "several", "showing",
+                  "various", "many", "different", "abstract", "concept", "modern", "beautiful", "simple",
+                  "small", "big", "large", "tiny", "final", "being", "very"}
+# Words that stock sites read the "wrong" way ("stream" -> rivers, "tracking" -> drone tracking shots).
+AMBIGUOUS_WORDS = {"stream", "streams", "streaming", "tracking", "track", "flow", "cloud", "pipeline", "bridge"}
+AGENT_TO_ACTION = {"reader": "reading", "writer": "writing", "runner": "running", "swimmer": "swimming",
+                   "driver": "driving", "speaker": "speaking", "dancer": "dancing", "singer": "singing",
+                   "player": "playing", "worker": "working", "painter": "painting", "cooker": "cooking"}
+# Disambiguation guard: an office / digital query must never be answered with pure landscape footage.
+DIGITAL_CONTEXT = {"data", "code", "coding", "server", "servers", "screen", "software", "reader", "reading", "page",
+                   "notebook", "computer", "laptop", "keyboard", "database", "network", "app", "website",
+                   "programming", "programmer", "message", "messages", "queue", "office", "phone", "smartphone",
+                   "monitor", "spreadsheet", "document", "documents", "book", "writing", "desk"}
+NATURE_TERMS = {"waterfall", "river", "forest", "nature", "farm", "tractor", "agriculture", "aerial", "mountain",
+                "mountains", "ocean", "sea", "lake", "creek", "landscape", "drone", "field", "fields", "silo",
+                "silos", "countryside", "rural", "beach", "waves", "jungle", "woods", "valley", "canyon", "cows",
+                "cattle", "crops", "meadow", "hills", "rainforest", "cascade"}
+_IGNORED_FOR_RELEVANCE = STOP_WORDS | CAMERA_WORDS | {"hands", "hand", "person", "people", "man", "woman"}
+AI_IMAGE_SOURCES = ("openai-images", "ai", "dalle", "gpt-image", "openrouter-images", "pollinations")
 
 
 @dataclass
@@ -66,6 +88,13 @@ def _pexels_pick_file(files: list[dict], prefer_4k: bool) -> dict | None:
     return max(files, key=short)
 
 
+def _slug_words(page_url: str) -> str:
+    """'https://www.pexels.com/video/person-writing-in-a-notebook-12345/' -> 'person writing in a notebook'."""
+    path = (page_url or "").rstrip("/").rsplit("/", 1)[-1]
+    words = [w for w in re.split(r"[-_]+", path) if w and not w.isdigit()]
+    return " ".join(words)
+
+
 @usage.free_call("pexels", "video-search")
 def pexels_videos(query: str, key: str, prefer_4k: bool = False, orientation: str = "portrait") -> list[MediaItem]:
     params = {"query": query, "per_page": 15, "size": "medium"}
@@ -74,12 +103,13 @@ def pexels_videos(query: str, key: str, prefer_4k: bool = False, orientation: st
     r = http().get("https://api.pexels.com/videos/search", params=params, headers={"Authorization": key}, timeout=30)
     raise_for_status(r, "Pexels video search")
     items = []
-    for v in r.json().get("videos", []):
+    for rank, v in enumerate(r.json().get("videos", [])):
         f = _pexels_pick_file(v.get("video_files", []), prefer_4k)
         if not f:
             continue
         items.append(MediaItem("pexels", str(v["id"]), "video", f["link"], f["width"], f["height"],
-                               float(v.get("duration") or 0), (v.get("user") or {}).get("name", ""), query=query))
+                               float(v.get("duration") or 0), (v.get("user") or {}).get("name", ""), query=query,
+                               extra={"tags": _slug_words(str(v.get("url") or "")), "rank": rank}))
     return items
 
 
@@ -91,14 +121,15 @@ def pexels_photos(query: str, key: str, orientation: str = "portrait") -> list[M
     r = http().get("https://api.pexels.com/v1/search", params=params, headers={"Authorization": key}, timeout=30)
     raise_for_status(r, "Pexels photo search")
     items = []
-    for p in r.json().get("photos", []):
+    for rank, p in enumerate(r.json().get("photos", [])):
         src = p.get("src") or {}
         url = src.get("original")
         if not url:
             continue
         url += ("&" if "?" in url else "?") + "auto=compress&cs=tinysrgb&h=2400"
+        tags = f"{_slug_words(str(p.get('url') or ''))} {p.get('alt') or ''}".strip()
         items.append(MediaItem("pexels-photo", str(p["id"]), "image", url, p.get("width", 0), p.get("height", 0),
-                               credit=p.get("photographer", ""), query=query))
+                               credit=p.get("photographer", ""), query=query, extra={"tags": tags, "rank": rank}))
     return items
 
 
@@ -110,13 +141,14 @@ def pixabay_videos(query: str, key: str, prefer_4k: bool = False) -> list[MediaI
     raise_for_status(r, "Pixabay video search")
     order = ["large", "medium", "small"] if prefer_4k else ["medium", "large", "small"]
     items = []
-    for h in r.json().get("hits", []):
+    for rank, h in enumerate(r.json().get("hits", [])):
         vids = h.get("videos") or {}
         f = next((vids[q] for q in order if (vids.get(q) or {}).get("url")), None)
         if not f:
             continue
         items.append(MediaItem("pixabay", str(h["id"]), "video", f["url"], f.get("width", 0), f.get("height", 0),
-                               float(h.get("duration") or 0), h.get("user", ""), query=query))
+                               float(h.get("duration") or 0), h.get("user", ""), query=query,
+                               extra={"tags": str(h.get("tags") or ""), "rank": rank}))
     return items
 
 
@@ -128,8 +160,9 @@ def pixabay_photos(query: str, key: str, orientation: str = "portrait") -> list[
         "per_page": 20, "safesearch": "true"})
     raise_for_status(r, "Pixabay photo search")
     return [MediaItem("pixabay-photo", str(h["id"]), "image", h["largeImageURL"], h.get("imageWidth", 0),
-                      h.get("imageHeight", 0), credit=h.get("user", ""), query=query)
-            for h in r.json().get("hits", []) if h.get("largeImageURL")]
+                      h.get("imageHeight", 0), credit=h.get("user", ""), query=query,
+                      extra={"tags": str(h.get("tags") or ""), "rank": rank})
+            for rank, h in enumerate(r.json().get("hits", [])) if h.get("largeImageURL")]
 
 
 # ------------------------------------------------------------------------------------------ AI images
@@ -242,8 +275,67 @@ def pollinations_image(prompt: str, dest: Path, width: int, height: int, key: st
 
 # ------------------------------------------------------------------------------------------ selection
 def simplify_query(query: str) -> str:
-    words = [w for w in re.findall(r"[A-Za-z]+", query.lower()) if w not in STOP_WORDS]
-    return " ".join(words[:2])
+    """Shorter fallback query that keeps the action and the concrete subject.
+
+    'writing numbered entries in notebook' -> 'writing notebook'; 'quiz contestant spilling coffee' ->
+    'spilling coffee'. Camera words, vague modifiers and words stock sites misread are dropped."""
+    drop = STOP_WORDS | CAMERA_WORDS | MODIFIER_WORDS | AMBIGUOUS_WORDS
+    words = [AGENT_TO_ACTION.get(w, w) for w in re.findall(r"[A-Za-z]+", query.lower()) if w not in drop]
+    words = list(dict.fromkeys(words))
+    if len(words) <= 2:
+        return " ".join(words)
+    last = words[-1]
+    action = next((w for w in words[:-1] if len(w) > 4 and w.endswith("ing")), "")
+    return f"{action} {last}" if action else " ".join(words[:2])
+
+
+def _stem(word: str) -> str:
+    w = word.lower()
+    if len(w) > 5 and w.endswith("ing"):
+        w = w[:-3]
+    elif len(w) > 4 and w.endswith("ies"):
+        w = w[:-3] + "y"
+    elif len(w) > 4 and w.endswith(("ches", "shes", "xes", "sses")):
+        w = w[:-2]
+    elif len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        w = w[:-1]
+    elif len(w) > 4 and w.endswith("ed"):
+        w = w[:-2]
+    if len(w) > 3 and w[-1] == w[-2] and w[-1] not in "aeiou":
+        w = w[:-1]
+    if len(w) > 4 and w.endswith("e"):
+        w = w[:-1]
+    return w
+
+
+def _tokens(text: str, ignore: set[str] = frozenset()) -> set[str]:
+    return {_stem(w) for w in re.findall(r"[a-z]+", (text or "").lower()) if w not in ignore and len(w) > 1}
+
+
+def _relevance_score(item: MediaItem, query: str) -> tuple[int, float]:
+    """(overlap_count, rank_bonus) between a search hit and the scene's query.
+
+    overlap_count is how many meaningful query terms appear in the hit's tags; -100 marks a classic false
+    positive (an office / digital query answered with pure landscape footage) that must never be used."""
+    extra = item.extra or {}
+    rank = extra.get("rank")
+    rank_bonus = max(0.0, 2.0 - float(rank) * 0.15) if isinstance(rank, (int, float)) else 0.0
+    tags_raw = str(extra.get("tags") or "")
+    if not tags_raw.strip():
+        return 0, rank_bonus
+    q_words = {w for w in re.findall(r"[a-z]+", (query or "").lower())}
+    q_tokens = _tokens(query, _IGNORED_FOR_RELEVANCE)
+    tag_words = set(re.findall(r"[a-z]+", tags_raw.lower()))
+    tag_tokens = _tokens(tags_raw, _IGNORED_FOR_RELEVANCE)
+    overlap = len(q_tokens & tag_tokens)
+    if (q_words & DIGITAL_CONTEXT and overlap == 0 and tag_words & NATURE_TERMS
+            and not tag_words & DIGITAL_CONTEXT):
+        return -100, 0.0
+    return overlap, rank_bonus
+
+
+def _has_tags(item: MediaItem) -> bool:
+    return bool(str((item.extra or {}).get("tags") or "").strip())
 
 
 def _shape(item: MediaItem) -> str:
@@ -252,15 +344,18 @@ def _shape(item: MediaItem) -> str:
     return "landscape" if item.width > item.height else "square"
 
 
-def _score(item: MediaItem, need: float, orientation: str = "portrait") -> float:
-    s = 0.0
+def _score(item: MediaItem, need: float, orientation: str = "portrait", query: str = "") -> float:
+    overlap, rank_bonus = _relevance_score(item, query) if query else (0, 0.0)
+    if overlap < 0:
+        return -100.0
+    s = overlap * 3.5 + rank_bonus
     if _shape(item) == orientation or (orientation == "square" and item.width and item.height):
         s += 3
     if item.kind == "video":
         s += 2 if item.duration >= need else (1 if item.duration >= need * 0.6 else 0)
     if min(item.width, item.height) >= 1080:
         s += 1
-    return s + random.uniform(0, 1.5)  # a little variety between similar candidates
+    return s + random.uniform(0, 0.35)  # only a tie-breaker between equally relevant candidates
 
 
 class Visuals:
@@ -286,6 +381,18 @@ class Visuals:
         self.repeat_extra = repeat_extra
         self.scene_media = scene_media or []
         self.credits: set[str] = set()
+        self._ai_refused: set[str] = set()
+
+    def _ai_fallback_source(self) -> str | None:
+        """AI image source used when stock footage has no confirmed match for a scene (needs a key)."""
+        s = self.s
+        if s.offline or not getattr(s, "ai_image_fallback", True):
+            return None
+        if s.openrouter_api_key and "openrouter-images" not in self._ai_refused:
+            return "openrouter-images"
+        if s.openai_api_key and "openai-images" not in self._ai_refused:
+            return "openai-images"
+        return None
 
     # -- search per source (cached per query) --
     def _search(self, source: str, query: str) -> list[MediaItem]:
@@ -339,7 +446,10 @@ class Visuals:
         items.sort(key=lambda i: i.extra["overlap"], reverse=True)
         return items
 
-    def _claim(self, candidates: list[MediaItem], need: float) -> MediaItem | None:
+    def _claim(self, candidates: list[MediaItem], need: float, query: str = "",
+               min_overlap: int = 0) -> MediaItem | None:
+        """Pick the best unused candidate. Stock hits carrying tags are ranked by relevance to ``query``;
+        known false positives are dropped, and ``min_overlap`` demands a confirmed semantic match."""
         with self.lock:
             fresh = [c for c in candidates if c.key not in self.used]
             if not fresh:
@@ -347,9 +457,22 @@ class Visuals:
             if fresh[0].source == "product-page":
                 best = fresh[0]
             elif fresh[0].source == "local":
+                if min_overlap and not fresh[0].extra.get("overlap"):
+                    return None
                 best = fresh[0] if fresh[0].extra.get("overlap") else random.choice(fresh)
             else:
-                best = max(fresh, key=lambda c: _score(c, need, self.s.orientation))
+                if query:
+                    rel = {c.key: _relevance_score(c, query) for c in fresh}
+                    fresh = [c for c in fresh if rel[c.key][0] >= 0]
+                    if min_overlap:
+                        fresh = [c for c in fresh if rel[c.key][0] >= min_overlap]
+                    if not fresh:
+                        return None
+                    tagged = [c for c in fresh if _has_tags(c)]
+                    if (tagged and len(tagged) == len(fresh)
+                            and all(rel[c.key][0] == 0 and int(c.extra.get("rank", 0) or 0) >= 5 for c in fresh)):
+                        return None  # only low-ranked, unrelated leftovers: try the next query instead
+                best = max(fresh, key=lambda c: _score(c, need, self.s.orientation, query))
             self.used.add(best.key)
             return best
 
@@ -377,6 +500,8 @@ class Visuals:
         except PermanentError as e:
             # A refused key or an exhausted free tier won't recover within this video: stop asking.
             with self.lock:
+                first_refusal = source not in self._ai_refused
+                self._ai_refused.add(source)
                 if source in self.sources:
                     self.sources = [x for x in self.sources if x != source]
                     hint = (" Anonymous Pollinations use is now heavily rate-limited; set POLLINATIONS_API_KEY "
@@ -384,6 +509,9 @@ class Visuals:
                             else "")
                     log.warning("AI images from %s refused (%s); skipping it for this video.%s",
                                 source, redact(e)[:160], hint)
+                elif first_refusal:
+                    log.warning("AI image fallback (%s) refused (%s); using stock footage only for this video",
+                                source, redact(e)[:160])
             return None
         except Exception as e:
             log.warning("AI image (%s) for scene %d failed: %s", source, idx + 1, redact(e))
@@ -404,6 +532,26 @@ class Visuals:
             return pool[idx:]
         return []
 
+    def _stock_pick(self, source: str, queries: list[str], need: float, dest_dir: Path, idx: int,
+                    min_overlap: int = 0) -> MediaItem | None:
+        for q in queries:
+            cand = self._search(source, q)
+            item = self._claim(cand, need, q, min_overlap=min_overlap)
+            if not item:
+                continue
+            try:
+                self._fetch(item, dest_dir, idx)
+            except Exception as e:
+                log.warning("Download failed for %s: %s", item.key, redact(e))
+                continue
+            if item.source.startswith("pexels"):
+                self.credits.add("Pexels")
+            elif item.source.startswith("pixabay"):
+                self.credits.add("Pixabay")
+            log.info("Scene %d: %s %s (%r)", idx + 1, item.source, item.kind, q)
+            return item
+        return None
+
     def for_scene(self, idx: int, query: str, image_prompt: str, topic: str, need: float, dest_dir: Path) -> MediaItem:
         for cand in self._extra_candidates_for_scene(idx):
             item = replace(cand, query=query)
@@ -415,13 +563,35 @@ class Visuals:
                 return item
             except Exception as e:
                 log.warning("Product media download failed (%s): %s", item.url[:60], redact(e))
-        queries = []
-        for q in (query, simplify_query(query), simplify_query(topic), topic):
-            q = (q or "").strip()
-            if q and q.lower() not in [x.lower() for x in queries]:
-                queries.append(q)
+
+        # Product scenes stay within their mapped gallery. A failed store URL must not turn into unrelated stock.
+        if idx < len(self.scene_media):
+            log.info("Scene %d: product media unavailable — using an animated background", idx + 1)
+            with usage.request("local", "animated-background", free=True, video_seconds=need):
+                pass
+            return MediaItem("generated", f"gradient-{idx}", "generated", query=query)
+
+        def dedupe(values, skip=()):
+            out: list[str] = []
+            for q in values:
+                q = (q or "").strip()
+                if q and q.lower() not in [x.lower() for x in [*out, *skip]]:
+                    out.append(q)
+            return out
+        scene_qs = dedupe([query, simplify_query(query)])
+        topic_qs = dedupe([simplify_query(topic), topic], skip=scene_qs)
+        # With an AI image key available, stock footage must prove it matches the scene (tag overlap) before
+        # it is used; a scene with no real match gets a tailor-made image instead of an unrelated clip.
+        fallback = self._ai_fallback_source()
+        strict = 1 if fallback else 0
+        tried_ai: set[str] = set()
+        deferred_ai = {"openrouter-images": {"openrouter-images"},
+                       "openai-images": {"openai-images", "ai", "dalle", "gpt-image"}}
         for source in list(self.sources):
-            if source in ("openai-images", "ai", "dalle", "gpt-image", "openrouter-images", "pollinations"):
+            if source in AI_IMAGE_SOURCES:
+                if fallback and source in deferred_ai.get(fallback, set()):
+                    continue
+                tried_ai.add(source)
                 item = self._ai(source, image_prompt or query, dest_dir, idx)
                 if item:
                     return item
@@ -440,22 +610,21 @@ class Visuals:
                 except Exception as e:
                     log.warning("OpenRouter video for scene %d failed: %s", idx + 1, redact(e))
                 continue
-            for q in queries:
-                cand = self._search(source, q)
-                item = self._claim(cand, need)
-                if not item:
-                    continue
-                try:
-                    self._fetch(item, dest_dir, idx)
-                except Exception as e:
-                    log.warning("Download failed for %s: %s", item.key, redact(e))
-                    continue
-                if item.source.startswith("pexels"):
-                    self.credits.add("Pexels")
-                elif item.source.startswith("pixabay"):
-                    self.credits.add("Pixabay")
-                log.info("Scene %d: %s %s (%r)", idx + 1, item.source, item.kind, q)
+            item = self._stock_pick(source, scene_qs, need, dest_dir, idx, min_overlap=strict)
+            if not item and not strict:
+                item = self._stock_pick(source, topic_qs, need, dest_dir, idx)
+            if item:
                 return item
+        if strict:
+            if fallback not in tried_ai:
+                log.info("Scene %d: no stock footage really matches %r — generating an image", idx + 1, query)
+                item = self._ai(fallback, image_prompt or query, dest_dir, idx)
+                if item:
+                    return item
+            for source in [x for x in self.sources if x not in AI_IMAGE_SOURCES and x != "openrouter-video"]:
+                item = self._stock_pick(source, [*scene_qs, *topic_qs], need, dest_dir, idx)
+                if item:
+                    return item
         log.info("Scene %d: no footage found for %r — using an animated background", idx + 1, query)
         with usage.request("local", "animated-background", free=True, video_seconds=need):
             pass

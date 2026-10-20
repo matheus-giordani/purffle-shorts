@@ -7,12 +7,23 @@ import json
 import logging
 import math
 import re
+from dataclasses import replace
+from html.parser import HTMLParser
+from pathlib import Path
 from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 from .config import Settings
 from .history import History
 from .script import LANGUAGES
-from .topics import Topic, _find_ld_products, _ld_images, _strip_html, _TextExtractor, extract_product
+from .topics import (
+    Topic,
+    _find_ld_products,
+    _ld_images,
+    _select_main_product,
+    _strip_html,
+    _TextExtractor,
+    extract_product,
+)
 from .utils import http, raise_for_status
 
 log = logging.getLogger("purffle")
@@ -70,6 +81,167 @@ ANALYSIS_SCHEMA = {
 }
 
 _VIDEO_URL_RE = re.compile(r'https?://[^\s"\'<>\\]+\.(?:mp4|webm)(?:\?[^\s"\'<>\\]*)?', re.I)
+_INVALID_PRODUCT_IMAGE = re.compile(r"(?:logo|favicon|payment|bandeira|pix|whatsapp|placeholder|avatar|1x1|blank|\.svg|\.gif)", re.I)
+
+
+def upgrade_and_dedupe_product_images(urls: list[str]) -> list[str]:
+    """Normalize store image URLs, prefer the largest supplied variant, and remove invalid duplicates."""
+    out: list[str] = []
+    seen: dict[str, tuple[int, int]] = {}
+    for raw in urls or []:
+        url = str(raw or "").strip()
+        if not url:
+            continue
+        url = re.sub(r"^http://", "https://", url, flags=re.I)
+        url = re.sub(r"^//", "https://", url)
+        parsed = urlparse(url)
+        host, path = parsed.netloc.lower(), parsed.path
+        if _INVALID_PRODUCT_IMAGE.search(path):
+            continue
+        image_size = 0
+        if host.endswith(("mitiendanube.com", "tiendanube.com")):
+            match = re.search(
+                r"-(?:(50|100|240|320|480|640)-0|(1024)-1024)\.(?:webp|jpe?g|png)$", path, flags=re.I
+            )
+            if match:
+                image_size = int(match.group(1) or match.group(2))
+        if "cdn.shopify.com" in host:
+            path = re.sub(r"_(?:pico|icon|thumb|small|compact|medium|large|grande|1024x1024|480x480|\d+x\d*)(?=\.(?:jpg|jpeg|png|webp)$)", "", path, flags=re.I)
+            path = re.sub(r"-sw(?=\.(?:jpg|jpeg|png|webp)$)", "", path, flags=re.I)
+        if "wp-content/uploads/" in path:
+            path = re.sub(r"-\d+x\d+(?=\.(?:jpg|jpeg|png|webp)$)", "", path, flags=re.I)
+        if "susercontent.com" in host:
+            path = re.sub(r"@resize[^\s]+", "", path)
+            path = re.sub(r"_tn$", "", path)
+            path = re.sub(r"_tn(?=\.(?:jpg|jpeg|png|webp)$)", "", path, flags=re.I)
+        upgraded = parsed._replace(scheme="https", path=path).geturl()
+        canonical_path = re.sub(r"-(?:50|100|240|320|480|640|1024)-0(?=\.(?:webp|jpe?g|png)$)", "", path, flags=re.I)
+        canonical_path = re.sub(r"-1024-1024(?=\.(?:webp|jpe?g|png)$)", "", canonical_path, flags=re.I)
+        canonical_path = re.sub(r"-sw(?=\.(?:jpg|jpeg|png|webp)$)", "", canonical_path, flags=re.I)
+        canonical = f"{host.lower()}{canonical_path}".lower()
+        previous = seen.get(canonical)
+        if previous:
+            previous_index, previous_size = previous
+            if image_size > previous_size:
+                out[previous_index] = upgraded
+                seen[canonical] = (previous_index, image_size)
+            continue
+        seen[canonical] = (len(out), image_size)
+        out.append(upgraded)
+    return out
+
+
+def classify_product_media_url(url: str, index: int) -> dict:
+    """Guess whether a product URL is a clip, clean hero photo, detail, or specification chart."""
+    path = unquote(urlparse(str(url or "")).path).lower()
+    name = path.rsplit("/", 1)[-1]
+    words = set(re.findall(r"[a-z0-9]+", name))
+    if Path(path).suffix.lower() in {".mp4", ".mov", ".m4v", ".webm", ".m3u8"} or "video" in words or "vod.susercontent" in url or "cv.shopee" in url:
+        return {"kind": "video", "role": "demo"}
+    if words & {"size", "dimension", "dimensions", "measurement", "measurements", "medida", "medidas",
+                "tabela", "chart", "spec", "specs"}:
+        role = "spec"
+    elif words & {"hero", "main", "primary", "front", "cover"} or index == 0:
+        role = "hero"
+    else:
+        role = "detail"
+    return {"kind": "image", "role": role}
+
+
+def _product_media_catalog(product: dict, image_limit: int = 8) -> list[tuple[str, dict]]:
+    videos = [str(url).strip() for url in (product.get("videos") or []) if str(url or "").strip()]
+    images = upgrade_and_dedupe_product_images(product.get("images") or [])
+    indexed_images = [(i, url, classify_product_media_url(url, i)) for i, url in enumerate(images[:image_limit])]
+    indexed_images.sort(key=lambda row: (row[2]["role"] == "spec", row[0]))
+    if indexed_images and not any(meta["role"] == "hero" for _, _, meta in indexed_images):
+        for _, _, meta in indexed_images:
+            if meta["role"] != "spec":
+                meta["role"] = "hero"
+                break
+    catalog = [(url, {"kind": "video", "role": "demo"}) for url in videos[:8]]
+    catalog.extend((url, {**meta, "kind": "image", "role": "detail" if meta["kind"] == "video" else meta["role"]})
+                   for _, url, meta in indexed_images)
+    return catalog
+
+
+def _media_context(product: dict, image_limit: int = 8) -> str:
+    catalog = _product_media_catalog(product, image_limit)
+    video_count = sum(meta["kind"] == "video" for _, meta in catalog)
+    image_count = len(catalog) - video_count
+    lines = [f"Available visual media: {video_count} video(s), {image_count} photo(s)."]
+    if video_count == 0 and image_count:
+        lines.append(
+            "Media constraint: This product only has static catalog photos (no video clips). Write narration "
+            "that highlights visible details, features, and benefits naturally over moving photos (Ken Burns), "
+            "avoiding phrases that pretend a live hand movement is happening on screen right now."
+        )
+    elif video_count == 0:
+        lines.append("Media constraint: No product video or catalog photo is available; do not describe a live action on screen.")
+    lines.append("Product media inventory:")
+    lines.extend(
+        f"- [media_index={i}] {meta['kind']} ({meta['role']}): {urlparse(url).path.rsplit('/', 1)[-1] or url}"
+        for i, (url, meta) in enumerate(catalog)
+    )
+    return "\n".join(lines)
+
+
+class _ProductGalleryParser(HTMLParser):
+    """Collect large image URLs from the product gallery classes used by Nuvemshop and WooCommerce."""
+
+    _GALLERY_CLASSES = {"js-product-slide-img", "woocommerce-product-gallery__image"}
+    _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+
+    def __init__(self, base_url: str):
+        super().__init__(convert_charrefs=True)
+        self.base_url = base_url
+        self.images: list[str] = []
+        self.stack: list[tuple[str, bool]] = []
+
+    def _capture(self, attrs: dict[str, str]) -> None:
+        for key in ("data-zoom", "data-large_image", "data-srcset", "srcset", "href", "data-src", "src"):
+            value = attrs.get(key, "")
+            if not value:
+                continue
+            if "srcset" in key:
+                candidates = []
+                for part in value.split(","):
+                    bits = part.strip().split()
+                    if bits:
+                        rank = float(re.sub(r"[^0-9.]", "", bits[-1]) or 0) if len(bits) > 1 else 0
+                        candidates.append((rank, bits[0]))
+                value = max(candidates, default=(0, ""))[1]
+            if value and not value.lower().startswith("data:"):
+                full = urljoin(self.base_url, html.unescape(value.strip()))
+                if full not in self.images:
+                    self.images.append(full)
+
+    def handle_starttag(self, tag, attrs):
+        values = {key.lower(): (value or "") for key, value in attrs if key}
+        classes = set(values.get("class", "").lower().split())
+        is_gallery = bool(classes & self._GALLERY_CLASSES)
+        if is_gallery or any(active for _, active in self.stack):
+            self._capture(values)
+        if tag not in self._VOID:
+            self.stack.append((tag, is_gallery))
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
+
+
+def _product_gallery_images(page: str, base_url: str) -> list[str]:
+    main_page = re.split(
+        r"(?i)(?:id=[\"']?related|class=[\"'][^\"']*(?:related|cross-sell|upsell|section-products-related))",
+        page, maxsplit=1,
+    )[0]
+    parser = _ProductGalleryParser(base_url)
+    try:
+        parser.feed(main_page)
+    except Exception:
+        pass
+    return parser.images
 
 
 def _base_url(url: str) -> str:
@@ -83,6 +255,8 @@ def _base_url(url: str) -> str:
 def detect_platform(url: str, page: str = "") -> str:
     low_u = (url or "").lower()
     low_p = (page or "").lower()
+    if "shopee." in low_u or "shopeemobile.com" in low_p or "susercontent.com" in low_p:
+        return "shopee"
     if "myshopify.com" in low_u or "cdn.shopify.com" in low_p or "shopify.shop" in low_p:
         return "shopify"
     if any(x in low_u or x in low_p for x in ("nuvemshop", "tiendanube", "d26lpennugtm8s.cloudfront.net", "ls.store")):
@@ -212,7 +386,7 @@ def scout_shopify_store(store_url: str, store_name: str = "", query: str = "", l
             "best_seller_rank": rank if is_best_selling else None,
             "benefits": bullets[:4],
             "description": desc,
-            "images": imgs[:8],
+            "images": upgrade_and_dedupe_product_images(imgs)[:8],
             "videos": videos[:4],
         })
         if len(results) >= limit:
@@ -278,7 +452,7 @@ def scout_woocommerce_store(store_url: str, store_name: str = "", query: str = "
                             "best_seller_rank": rank,
                             "benefits": bullets[:4],
                             "description": desc,
-                            "images": imgs[:8],
+                            "images": upgrade_and_dedupe_product_images(imgs)[:8],
                             "videos": videos,
                         })
                     if out:
@@ -343,13 +517,131 @@ def _scout_html_catalog(catalog_url: str, base: str, store_name: str, platform: 
     return out
 
 
-def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: int | None = None) -> dict | None:
+def scout_shopee_product(url: str, store_name: str = "", rank: int | None = None,
+                         use_browser: bool = True) -> dict | None:
+    """Extract product metadata, full image gallery and HD demo videos from a Shopee product page URL.
+
+    Combines fast SSR/crawler metadata extraction with an optional Playwright network intercept
+    to capture the seller's original .mp4 video stream and 800x800+ catalog images.
+    """
+    url = (url or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        return None
+    base = _base_url(url)
+    name = store_name or "Shopee"
+
+    headers = {
+        "User-Agent": "WhatsApp/2.21.12.21 A",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    title = ""
+    desc = ""
+    images: list[str] = []
+    videos: list[str] = []
+
+    # 1. Fast Meta extraction via SSR/crawler headers
+    try:
+        r = http().get(url, headers=headers, timeout=20)
+        if r.status_code == 200:
+            html_text = r.text
+            m_title = re.search(r'<meta[^>]+property=[\"\']og:title[\"\'][^>]+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
+            if m_title:
+                title = re.sub(r"\s*\|\s*Shopee.*$", "", m_title.group(1), flags=re.I).strip()
+            m_desc = re.search(r'<meta[^>]+property=[\"\']og:description[\"\'][^>]+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
+            if m_desc:
+                desc = re.sub(r"^Compre [^!]+!\s*", "", m_desc.group(1), flags=re.I).strip()
+            m_img = re.search(r'<meta[^>]+property=[\"\']og:image[\"\'][^>]+content=[\"\']([^\"\']+)[\"\']', html_text, re.I)
+            if m_img:
+                images.append(m_img.group(1).strip())
+    except Exception as e:
+        log.warning("Shopee SSR crawler request failed: %s", e)
+
+    # 2. Deep Scout via Playwright (intercepts gallery images & video .mp4)
+    if use_browser:
+        try:
+            from playwright.sync_api import sync_playwright
+            import os
+            chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            launch_kwargs = {"headless": True}
+            if os.path.exists(chrome_path):
+                launch_kwargs["executable_path"] = chrome_path
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch(**launch_kwargs)
+                page = browser.new_page(
+                    viewport={"width": 1280, "height": 800},
+                    user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    locale="pt-BR"
+                )
+
+                def on_response(res):
+                    u = res.url
+                    if "susercontent.com/file/" in u:
+                        clean_img = re.sub(r"@resize[^\s]+", "", u).split("_tn")[0]
+                        if clean_img not in images and not any(x in clean_img for x in ("icon", "avatar", "logo")):
+                            images.append(clean_img)
+                    elif any(ext in u for ext in (".mp4", ".m3u8", "cv.shopee.com", "vod.susercontent.com")):
+                        if u not in videos:
+                            videos.append(u)
+
+                page.on("response", on_response)
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                page.wait_for_timeout(3500)
+
+                if not title:
+                    t = page.title()
+                    title = re.sub(r"\s*\|\s*Shopee.*$", "", t, flags=re.I).strip()
+
+                browser.close()
+        except Exception as e:
+            log.info("Shopee Playwright media intercept skipped or failed: %s", e)
+
+    if not title and not desc:
+        return None
+
+    # Bullets extraction from description
+    bullets = []
+    for line in desc.splitlines():
+        clean_ln = line.strip(" •-–*✔🚗🛞⚙️🔋🔦📦📏\t\r")
+        if 8 <= len(clean_ln) <= 180 and not clean_ln.startswith("#"):
+            bullets.append(clean_ln)
+            if len(bullets) >= 4:
+                break
+
+    return {
+        "store_name": name,
+        "platform": "shopee",
+        "external_url": url,
+        "title": title[:160],
+        "price": "",
+        "compare_price": "",
+        "currency": "BRL",
+        "discount_pct": 0,
+        "rating": None,
+        "reviews_count": 0,
+        "best_seller_rank": rank,
+        "benefits": bullets[:4],
+        "description": desc[:1200],
+        "images": upgrade_and_dedupe_product_images(images)[:8],
+        "videos": videos[:4],
+    }
+
+
+def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: int | None = None,
+                      use_browser: bool = True) -> dict | None:
     """Extract a full product record from a single product page URL (Shopify .json or HTML JSON-LD/OpenGraph)."""
     url = (url or "").strip()
     if not re.match(r"^https?://", url, re.I):
         return None
     base = _base_url(url)
     name = store_name or urlparse(base).netloc.removeprefix("www.")
+
+    # Try Shopee dedicated scraper with crawler + Playwright video/image interception
+    if "shopee." in url.lower():
+        shopee_item = scout_shopee_product(url, store_name=name, rank=rank, use_browser=use_browser)
+        if shopee_item:
+            return shopee_item
 
     # Try Shopify single-product JSON endpoint first if URL contains /products/<handle>
     m_shop = re.search(r"^(https?://[^/]+/products/[^/?#]+)", url, re.I)
@@ -365,7 +657,7 @@ def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: 
                 price = str(v0.get("price") or "").strip()
                 compare = str(v0.get("compare_at_price") or "").strip()
                 discount = _calc_discount(price, compare)
-                imgs = [re.sub(r"^//", "https://", str(im.get("src") or "").strip())
+                imgs = [str(im.get("src") or "").strip()
                         for im in (prod.get("images") or []) if isinstance(im, dict) and im.get("src")]
                 desc, bullets = _extract_bullets_from_html(body_html)
                 videos = _extract_videos_from_html(body_html, base)
@@ -383,7 +675,7 @@ def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: 
                     "best_seller_rank": rank,
                     "benefits": bullets[:4],
                     "description": desc,
-                    "images": imgs[:8],
+                    "images": upgrade_and_dedupe_product_images(imgs)[:8],
                     "videos": videos,
                 }
         except Exception:
@@ -414,7 +706,7 @@ def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: 
     rating = None
     rev_cnt = 0
     if ld_products:
-        lp = ld_products[0]
+        lp = _select_main_product(ld_products, title)
         offers = lp.get("offers")
         if isinstance(offers, list):
             offers = offers[0] if offers else {}
@@ -439,6 +731,9 @@ def scout_product_url(url: str, store_name: str = "", platform: str = "", rank: 
 
     discount = _calc_discount(price, compare)
     bullets = [b for b in ext.bullets if 10 <= len(b) <= 180][:4]
+    if plat in {"nuvemshop", "woocommerce"}:
+        imgs.extend(_product_gallery_images(page, url))
+    imgs = upgrade_and_dedupe_product_images(imgs)
     videos = _extract_videos_from_html(page, base)
     return {
         "store_name": name,
@@ -556,6 +851,10 @@ def analyze_products_with_ai(llm, items: list[dict], settings: Settings | None =
                 "discount_pct": b.get("discount_pct", 0),
                 "rating": b.get("rating"),
                 "reviews_count": b.get("reviews_count", 0),
+                "videos_count": len(b.get("videos") or []),
+                "images_count": len(b.get("images") or []),
+                "image_files": [urlparse(str(url)).path.rsplit("/", 1)[-1]
+                                for url in (b.get("images") or [])[:8]],
                 "benefits": (b.get("benefits") or [])[:4],
                 "description": (b.get("description") or "")[:500],
             }
@@ -722,21 +1021,23 @@ def build_scene_media_for_products(products: list[dict], scenes: list, timeline:
     pools: list[list[MediaItem]] = []
     names: list[set[str]] = []
     for p_idx, p in enumerate(products):
-        vids = [
-            MediaItem("product-page", f"p{p_idx}vid{i:02d}", "video", url=u)
-            for i, u in enumerate(p.get("videos") or []) if u
-        ]
-        imgs = [
-            MediaItem("product-page", f"p{p_idx}img{i:02d}", "image", url=u)
-            for i, u in enumerate(p.get("images") or []) if u
-        ]
-        pools.append(vids + imgs)
+        catalog = _product_media_catalog(p)
+        counts = {"video": 0, "image": 0}
+        pool = []
+        for media_index, (url, meta) in enumerate(catalog):
+            kind = meta["kind"]
+            media_id = f"p{p_idx}{'vid' if kind == 'video' else 'img'}{counts[kind]:02d}"
+            counts[kind] += 1
+            pool.append(MediaItem("product-page", media_id, kind, url=url,
+                                  extra={**meta, "media_index": media_index}))
+        pools.append(pool)
         words = set(re.findall(
             r"\w{3,}", f"{p.get('short_name') or ''} {p.get('title') or ''}".lower()
         ))
         names.append(words)
 
     counts = [0] * len(products)
+    last_media: dict[int, str] = {}
     out: list[list[MediaItem]] = []
     for t_idx, st in enumerate(timeline):
         sc = scenes[st.index] if st.index < len(scenes) else scenes[-1]
@@ -763,9 +1064,38 @@ def build_scene_media_for_products(products: list[dict], scenes: list, timeline:
                 chosen = min(len(products) - 1, int(t_idx * len(products) / max(1, len(timeline))))
         pool = pools[chosen]
         if pool:
-            start = counts[chosen] % len(pool)
+            scene_number = counts[chosen]
+            requested = getattr(sc, "media_index", -1)
+            selected = next((item for item in pool if item.extra["media_index"] == requested), None)
+            if selected and (selected.extra["role"] == "spec" and t_idx < 2):
+                selected = None
+            if selected and selected.key == last_media.get(chosen) and len(pool) > 1:
+                # Avoid freezing on the exact same static media across consecutive scenes
+                selected = None
+            if selected is None:
+                narration = getattr(sc, "narration", "") or ""
+                specs = bool(re.search(r"\b\d+(?:[.,]\d+)?\s*(?:cm|mm|ml|watts?|w|litros?)\b|material|medida", narration, re.I))
+                if scene_number == 0:
+                    roles = {"demo": 0, "hero": 1, "detail": 2, "spec": 3}
+                elif specs:
+                    roles = {"spec": 0, "detail": 1, "demo": 2, "hero": 3}
+                else:
+                    roles = {"demo": 0, "detail": 1, "hero": 2, "spec": 3}
+                ordered = sorted(pool, key=lambda item: roles.get(item.extra["role"], 4))
+                if len(pool) > 1 and t_idx < 2:
+                    non_specs = [item for item in ordered if item.extra["role"] != "spec"]
+                    ordered = non_specs + [item for item in ordered if item.extra["role"] == "spec"]
+                eligible = [item for item in ordered if item.key != last_media.get(chosen)] or ordered
+                best_rank = min(roles.get(item.extra["role"], 4) for item in eligible)
+                preferred = [item for item in eligible if roles.get(item.extra["role"], 4) == best_rank]
+                selected = preferred[max(0, scene_number - 1) % len(preferred)]
+            start = pool.index(selected)
             counts[chosen] += 1
-            out.append(pool[start:] + pool[:start])
+            last_media[chosen] = selected.key
+            rotated = pool[start:] + pool[:start]
+            focused = replace(selected, extra={**selected.extra, "focus_x": getattr(sc, "focus_x", 0.5),
+                                               "focus_y": getattr(sc, "focus_y", 0.5)})
+            out.append([focused] + [item for item in rotated if item.key != selected.key])
         else:
             out.append([])
     return out
@@ -803,12 +1133,14 @@ def build_product_topic(products: list[dict], custom_links: list[str] | None = N
             blocks.append(f"Suggested 2s Hook: {p['hook_idea']}")
         if p.get("visual_angle"):
             blocks.append(f"Visual demonstration angle: {p['visual_angle']}")
+        blocks.append(_media_context(p))
         if p.get("benefits"):
             blocks.append("Verified features & specs:\n" + "\n".join(f"- {b}" for b in p["benefits"]))
         if p.get("description"):
             blocks.append(f"Product details:\n{p['description'][:1200]}")
-        images.extend(p.get("images") or [])
-        videos.extend(p.get("videos") or [])
+        catalog = _product_media_catalog(p)
+        videos.extend(url for url, meta in catalog if meta["kind"] == "video")
+        images.extend(url for url, meta in catalog if meta["kind"] == "image")
     else:
         names = [p.get("short_name") or p.get("title") or f"Product {i}" for i, p in enumerate(products, 1)]
         subject = f"{len(products)} viral products: " + ", ".join(names[:5])
@@ -823,6 +1155,7 @@ def build_product_topic(products: list[dict], custom_links: list[str] | None = N
             badge = f"{idx}. {short}"
             price = f"{p.get('currency', '')} {p.get('price', '')}".strip()
             lines = [f"### {badge} ({p.get('title', short)})"]
+            lines.append(_media_context(p, image_limit=4))
             if price or p.get("best_seller_rank"):
                 meta = " · ".join(x for x in [
                     f"Best-seller #{p['best_seller_rank']}" if p.get("best_seller_rank") else "",
@@ -841,10 +1174,15 @@ def build_product_topic(products: list[dict], custom_links: list[str] | None = N
             if p.get("description"):
                 lines.append(f"- Details: {p['description'][:400]}")
             blocks.append("\n".join(lines))
-            for v in (p.get("videos") or [])[:1]:
+            catalog = _product_media_catalog(p, image_limit=4)
+            for v, meta in catalog:
+                if meta["kind"] != "video":
+                    continue
                 if v not in videos:
                     videos.append(v)
-            for im in (p.get("images") or [])[:2]:
+            for im, meta in catalog:
+                if meta["kind"] != "image":
+                    continue
                 if im not in images:
                     images.append(im)
 
@@ -855,8 +1193,8 @@ def build_product_topic(products: list[dict], custom_links: list[str] | None = N
         key=key,
         context="\n\n".join(blocks)[:6000],
         style="product",
-        images=images[:12],
-        videos=videos[:6],
+        images=images[:20],
+        videos=videos[:20],
         product_links=links,
         product_ids=pids,
     )

@@ -285,6 +285,19 @@ def _ld_images(val) -> list[str]:
     return []
 
 
+def _select_main_product(products: list[dict], title: str = "") -> dict:
+    """Choose JSON-LD product matching the page title, falling back to the first product node."""
+    if not products:
+        return {}
+    title_key = re.sub(r"[\W_]+", " ", (title or "").lower()).strip()
+    if title_key:
+        for product in products:
+            name = re.sub(r"[\W_]+", " ", _strip_html(str(product.get("name") or "")).lower()).strip()
+            if name and name == title_key:
+                return product
+    return products[0]
+
+
 def extract_product(page: str, url: str = "") -> tuple[str, str, list[str]] | None:
     """If ``page`` is an e-commerce / product page, return (title, context, image_urls); else None."""
     p = _TextExtractor()
@@ -306,10 +319,11 @@ def extract_product(page: str, url: str = "") -> tuple[str, str, list[str]] | No
     lines: list[str] = []
     images: list[str] = []
 
-    for prod in ld_products[:6]:
+    prod = _select_main_product(ld_products, title)
+    if not title and prod:
+        title = _strip_html(str(prod.get("name") or "")).strip()
+    if prod:
         name = _strip_html(str(prod.get("name") or ""))
-        if name and not title:
-            title = name
         brand = prod.get("brand")
         brand_name = _strip_html(str(brand.get("name") if isinstance(brand, dict) else brand or ""))
         offers = prod.get("offers")
@@ -366,6 +380,11 @@ def extract_product(page: str, url: str = "") -> tuple[str, str, list[str]] | No
         if re.match(r"^https?://", full) and full not in clean_imgs:
             clean_imgs.append(full)
 
+    # Import lazily: products imports this module, while direct extract_product callers still need the
+    # same URL normalization and invalid-image filtering as the product scouting paths.
+    from .products import upgrade_and_dedupe_product_images
+
+    clean_imgs = upgrade_and_dedupe_product_images(clean_imgs)
     context = "\n".join(dict.fromkeys(ln for ln in lines if ln)).strip()
     return (title, context, clean_imgs) if (title or context) else None
 
@@ -403,6 +422,14 @@ def from_url(url: str) -> Topic:
         raise ValueError(f"not a web address: {url}")
     if _REDDIT_POST.match(url):
         return from_reddit_post(url)
+    if "shopee." in url.lower():
+        from .products import scout_shopee_product, build_product_topic
+        shopee_item = scout_shopee_product(url)
+        if shopee_item:
+            topic = build_product_topic([shopee_item])
+            topic.source = "url"
+            topic.key = f"url:{url}"
+            return topic
     r = http().get(url, timeout=30, headers={"Accept": "text/html,application/xhtml+xml"})
     raise_for_status(r, f"fetch {url[:60]}")
     prod = extract_product(r.text, url)
@@ -413,7 +440,10 @@ def from_url(url: str) -> Topic:
         )]
         vids = list(dict.fromkeys(vids))[:4]
         links = [f"{subj or 'Produto'}: {url}"]
-        return Topic(subj or url, "url", key=f"url:{url}", context=ctx[:6000], style="product",
+        from .products import _media_context
+
+        media_context = _media_context({"images": imgs[:8], "videos": vids})
+        return Topic(subj or url, "url", key=f"url:{url}", context=f"{media_context}\n\n{ctx}"[:6000], style="product",
                      images=imgs[:8], videos=vids, product_links=links)
     title, text = extract_article(r.text)
     if len(text) < 200:

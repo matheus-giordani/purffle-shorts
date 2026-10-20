@@ -157,7 +157,7 @@ class Provider:
     name: str = ""
     model: str = ""
 
-    def complete(self, system: str, user: str, *, schema: dict | None = None,
+    def complete(self, system: str, user: str | list[dict], *, schema: dict | None = None,
                  temperature: float = 0.9, max_tokens: int = 4000) -> str:
         raise NotImplementedError
 
@@ -166,13 +166,14 @@ class Provider:
 
 
 class OpenAICompatible(Provider):
-    def __init__(self, preset: Preset, model: str, api_key: str, base_url: str):
+    def __init__(self, preset: Preset, model: str, api_key: str, base_url: str, reasoning_effort: str = ""):
         self.name, self.preset, self.model = preset.name, preset, model
         self.api_key, self.base_url = api_key, base_url.rstrip("/")
+        self.reasoning_effort = reasoning_effort
         self._json_mode = preset.json_mode
 
     def _is_reasoning_model(self) -> bool:
-        return bool(re.match(r"^(o\d|gpt-5)", self.model.split("/")[-1]))
+        return bool(re.match(r"^(o\d|gpt-[56])", self.model.split("/")[-1]))
 
     def complete(self, system, user, *, schema=None, temperature=0.9, max_tokens=4000) -> str:
         payload: dict[str, Any] = {
@@ -181,6 +182,8 @@ class OpenAICompatible(Provider):
         }
         if self._is_reasoning_model():
             payload["max_completion_tokens"] = max(max_tokens, 8000)  # room for hidden reasoning tokens
+            if self.name == "openrouter" and self.reasoning_effort:
+                payload["reasoning"] = {"effort": self.reasoning_effort}
         else:
             payload["temperature"] = temperature
             payload["max_tokens"] = max_tokens
@@ -289,7 +292,8 @@ def build_provider(name: str, settings: Settings, model: str = "") -> Provider:
         base_url = settings.llm_base_url
     if not key and not preset.local and name != "custom":
         raise LLMConfigError(f"{preset.label}: set {' or '.join(preset.key_envs)} in .env")
-    return OpenAICompatible(preset, model, key, base_url)
+    effort = settings.openrouter_reasoning_effort if name == "openrouter" else ""
+    return OpenAICompatible(preset, model, key, base_url, effort)
 
 
 class LLM:
@@ -316,12 +320,27 @@ class LLM:
         return str(self.providers[0])
 
     def complete_json(self, system: str, user: str, schema: dict | None = None,
-                      max_tokens: int = 4000) -> dict[str, Any]:
+                      max_tokens: int = 4000, images: list[tuple[str, str]] | None = None) -> dict[str, Any]:
         errors = []
         for p in self.providers:
-            def _call(p=p):
-                text = p.complete(system, user, schema=schema if schema is not None else {}, max_tokens=max_tokens,
-                                  temperature=self.settings.llm_temperature)
+            content: str | list[dict] = user
+            if images:
+                content = [{"type": "text", "text": user}]
+                for label, url in images:
+                    content.append({"type": "text", "text": label})
+                    content.append({"type": "image", "source": {"type": "url", "url": url}}
+                                   if p.name == "anthropic" else
+                                   {"type": "image_url", "image_url": {"url": url}})
+            def _call(p=p, content=content):
+                try:
+                    text = p.complete(system, content, schema=schema if schema is not None else {}, max_tokens=max_tokens,
+                                      temperature=self.settings.llm_temperature)
+                except PermanentError as exc:
+                    if not images or not re.search(r"image|vision|multimodal", str(exc), re.I):
+                        raise
+                    log.warning("%s could not use product photos; continuing with the source text", p)
+                    text = p.complete(system, user, schema=schema if schema is not None else {}, max_tokens=max_tokens,
+                                      temperature=self.settings.llm_temperature)
                 try:
                     return extract_json(text)
                 except Exception as exc:

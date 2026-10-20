@@ -6,9 +6,11 @@ import time
 
 from purffle_shorts import products as PR
 from purffle_shorts import studio as ST
+from purffle_shorts.config import Settings
 from purffle_shorts.history import History
 from purffle_shorts.pipeline import final_description
 from purffle_shorts.script import Scene, Script, review_prompt
+from purffle_shorts.topics import extract_product
 
 
 class FakeResp:
@@ -60,6 +62,49 @@ def test_detect_platform():
     assert PR.detect_platform("https://site.com", '<script src="https://cdn.shopify.com/s/files.js"></script>') == "shopify"
     assert PR.detect_platform("https://site.com", "var LS = { store: 'tiendanube' };") == "nuvemshop"
     assert PR.detect_platform("https://site.com", '<link href="/wp-content/plugins/woocommerce/style.css">') == "woocommerce"
+
+
+def test_upgrade_and_dedupe_product_images():
+    urls = [
+        "http://acdn.mitiendanube.com/stores/1/products/calendario-480-0.webp?width=480",
+        "https://acdn.mitiendanube.com/stores/1/products/calendario-640-0.webp?width=640",
+        "https://cdn.shopify.com/s/files/photo_small.jpg?v=1",
+        "https://cdn.shopify.com/s/files/photo.jpg?v=2",
+        "https://loja.com/wp-content/uploads/produto-300x300.jpg",
+        "https://loja.com/logo.png",
+    ]
+    assert PR.upgrade_and_dedupe_product_images(urls) == [
+        "https://acdn.mitiendanube.com/stores/1/products/calendario-640-0.webp?width=640",
+        "https://cdn.shopify.com/s/files/photo.jpg?v=1",
+        "https://loja.com/wp-content/uploads/produto.jpg",
+    ]
+
+
+def test_extract_product_uses_page_product_not_related_ld_products():
+    page = '''
+    <meta property="og:title" content="Calendário de Madeira | Loja">
+    <meta property="og:type" content="product">
+    <script type="application/ld+json">{"@graph":[
+      {"@type":"Product","name":"Produto relacionado","image":"https://cdn.example/related.jpg"},
+      {"@type":"Product","name":"Calendário de Madeira","image":"https://cdn.example/main.jpg"}
+    ]}</script>'''
+    title, context, images = extract_product(page, "https://loja.com/produtos/calendario")
+    assert title == "Calendário de Madeira"
+    assert "Calendário de Madeira" in context and "Produto relacionado" not in context
+    assert images == ["https://cdn.example/main.jpg"]
+
+
+def test_product_gallery_extracts_full_images_before_related(monkeypatch):
+    page = '''
+    <meta property="og:title" content="Calendário de Madeira">
+    <meta property="og:type" content="product">
+    <div class="woocommerce-product-gallery__image"><a href="//cdn.example/wp-content/uploads/main.jpg">
+      <img src="https://cdn.example/wp-content/uploads/main-300x300.jpg" data-large_image="https://cdn.example/wp-content/uploads/main.jpg">
+    </a></div>
+    <section class="related products"><img src="https://cdn.example/related.jpg"></section>'''
+    monkeypatch.setattr(PR, "http", lambda: FakeHTTP(lambda *_a, **_kw: FakeResp(text=page)))
+    product = PR.scout_product_url("https://loja.com/produto/calendario", platform="woocommerce")
+    assert product["images"] == ["https://cdn.example/wp-content/uploads/main.jpg"]
 
 
 def test_scout_shopify_store_and_ai_dossier(monkeypatch):
@@ -377,6 +422,7 @@ def test_studio_products_endpoints_and_draft_with_affiliate_links(settings):
 
 def test_product_scene_media_mapping_and_visuals_cycling(tmp_path, settings, monkeypatch):
     from types import SimpleNamespace
+
     from purffle_shorts import media as MD
 
     def fake_download(url, dest, **kw):
@@ -430,4 +476,119 @@ def test_product_scene_media_mapping_and_visuals_cycling(tmp_path, settings, mon
         "https://cdn.example.com/escova1.jpg",
         "https://cdn.example.com/escova2.jpg",
     ]
+
+
+def test_product_media_inventory_and_semantic_scene_mapping():
+    from types import SimpleNamespace
+
+    products = [
+        {"title": "Produto Um", "short_name": "Produto Um", "videos": [], "images": [
+            "https://cdn.example/p1/hero.jpg", "https://cdn.example/p1/detail.jpg",
+            "https://cdn.example/p1/size-chart.jpg", "https://cdn.example/p1/usage.jpg",
+        ]},
+        {"title": "Produto Dois", "short_name": "Produto Dois", "videos": [], "images": [
+            "https://cdn.example/p2/hero.jpg", "https://cdn.example/p2/detail.jpg",
+            "https://cdn.example/p2/usage.jpg", "https://cdn.example/p2/other.jpg",
+        ]},
+        {"title": "Produto Três", "short_name": "Produto Três", "videos": [], "images": [
+            "https://cdn.example/p3/hero.jpg", "https://cdn.example/p3/detail.jpg",
+            "https://cdn.example/p3/usage.jpg", "https://cdn.example/p3/other.jpg",
+        ]},
+    ]
+    scenes = [
+        Scene("Que detalhe esse produto esconde?", "product", "product", product="1. Produto Um", media_index=3),
+        Scene("Ele ajuda na organização diária.", "organizer", "organizer", product="1. Produto Um"),
+        Scene("Ele mede 12 cm e cabe na gaveta.", "product size", "product", product="1. Produto Um", media_index=3),
+        Scene("O segundo produto economiza espaço.", "product two", "product", product="2. Produto Dois"),
+        Scene("Veja o acabamento de perto.", "product detail", "product", product="2. Produto Dois"),
+        Scene("O terceiro produto facilita a rotina.", "product three", "product", product="3. Produto Três"),
+        Scene("Ele tem uma alça confortável.", "product handle", "product", product="3. Produto Três"),
+    ]
+    timeline = [SimpleNamespace(index=i, duration=3.0) for i in range(len(scenes))]
+    scene_media = PR.build_scene_media_for_products(products, scenes, timeline)
+
+    assert len(scene_media) == 7
+    assert scene_media[0][0].extra["role"] == "hero"  # ignores a size-chart request in the opening scene
+    assert scene_media[2][0].url.endswith("size-chart.jpg")
+    assert scene_media[2][0].extra["role"] == "spec"
+    for i, items in enumerate(scene_media):
+        product_no = 1 if i < 3 else 2 if i < 5 else 3
+        assert items and all(item.source == "product-page" for item in items)
+        assert all(f"p{product_no}/" in item.url for item in items)
+
+    topic = PR.build_product_topic(products)
+    assert "Available visual media: 0 video(s), 4 photo(s)." in topic.context
+    assert "static catalog photos (no video clips)" in topic.context
+    assert "[media_index=0]" in topic.context and "size-chart.jpg" in topic.context
+
+
+def test_unavailable_product_gallery_does_not_fall_back_to_stock(tmp_path, monkeypatch):
+    from purffle_shorts import media as MD
+
+    item = MD.MediaItem("product-page", "photo", "image", url="https://cdn.example/missing.jpg")
+    visuals = MD.Visuals(Settings(visual_sources=["pixabay"]), scene_media=[[item]])
+    searched = []
+
+    def fail_download(*_args, **_kwargs):
+        raise RuntimeError("missing")
+
+    monkeypatch.setattr(MD, "download", fail_download)
+    monkeypatch.setattr(visuals, "_search", lambda *args: searched.append(args) or [])
+    chosen = visuals.for_scene(0, "product", "product photo", "product", 3.0, tmp_path)
+    assert chosen.kind == "generated"
+    assert not searched
+
+
+def test_explicit_product_photo_is_reused_when_two_scenes_need_the_same_detail():
+    from types import SimpleNamespace
+
+    product = {"title": "Calendar", "images": ["https://cdn.example/hero.jpg", "https://cdn.example/detail.jpg"]}
+    scenes = [Scene("The pointer marks the month.", "calendar", media_index=1, focus_x=0.3),
+              Scene("The numbers above it form the day.", "calendar", media_index=1, focus_x=0.7)]
+    timeline = [SimpleNamespace(index=index) for index in range(2)]
+    choices = PR.build_scene_media_for_products([product], scenes, timeline)
+
+    assert [items[0].url for items in choices] == ["https://cdn.example/detail.jpg"] * 2
+    assert [items[0].extra["focus_x"] for items in choices] == [0.3, 0.7]
+
+
+def test_analyze_products_ai_payload_includes_media_inventory():
+    class InspectLLM:
+        prompt = ""
+
+        def generate_json(self, prompt, system=""):
+            self.prompt = prompt
+            return {"products": []}
+
+    llm = InspectLLM()
+    PR.analyze_products_with_ai(llm, [{"title": "Produto", "images": ["https://cdn.example/hero.jpg"],
+                                      "videos": ["https://cdn.example/demo.mp4"]}])
+    assert '"videos_count": 1' in llm.prompt
+    assert '"images_count": 1' in llm.prompt
+    assert "hero.jpg" in llm.prompt
+
+
+def test_scout_shopee_product_and_media_normalization(monkeypatch):
+    shopee_html = """
+    <html><head>
+    <meta property="og:title" content="Projetor Smart HY320 Android Full HD | Shopee Brasil">
+    <meta property="og:description" content="Compre Projetor Smart HY320 na Shopee! Cinema portátil com 1080p nativo e Android.">
+    <meta property="og:image" content="https://down-br.img.susercontent.com/file/sg-11134201-capa@resize_w82_nl.webp">
+    </head><body></body></html>
+    """
+    monkeypatch.setattr(PR, "http", lambda: FakeHTTP(lambda url, **kw: FakeResp(text=shopee_html)))
+
+    prod = PR.scout_shopee_product("https://shopee.com.br/Projetor-Smart-HY320-i.123456.789012", use_browser=False)
+    assert prod is not None
+    assert prod["platform"] == "shopee"
+    assert prod["title"] == "Projetor Smart HY320 Android Full HD"
+    assert "Cinema portátil" in prod["description"]
+    # Image must have @resize suffix stripped by upgrade_and_dedupe_product_images
+    assert prod["images"] == ["https://down-br.img.susercontent.com/file/sg-11134201-capa"]
+
+    # Verify video classification for Shopee VOD stream
+    cat = PR.classify_product_media_url("https://down-tx-br.vod.susercontent.com/api/v4/11110106/mms/demo.mp4", 0)
+    assert cat["kind"] == "video"
+    assert cat["role"] == "demo"
+
 
